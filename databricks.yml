@@ -1,0 +1,13 @@
+bundle:
+  name: talend-databricks-migration
+
+include:
+  - resources/jobs/*.yml
+  - resources/agents/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

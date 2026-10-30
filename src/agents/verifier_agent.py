@@ -8,9 +8,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import mlflow
 
-from src.tools.model_client import parse_json_response, query_model
+from src.tools.model_client import query_model_json
+from src.tools.tracing import trace
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "verifier_agent.md"
 PROMPT_VERSION = "1"
@@ -22,7 +22,7 @@ def _load_prompt() -> str:
     return PROMPT_PATH.read_text()
 
 
-@mlflow.trace(name="verifier_agent.run")
+@trace("verifier_agent.run")
 def run_verifier_agent(
     pipeline_id: str,
     raw_files: dict[str, str],
@@ -41,8 +41,7 @@ def run_verifier_agent(
         f"SPEC TO AUDIT (produced by a different agent/model):\n"
         f"{json.dumps(spec, indent=2)}"
     )
-    response = query_model(system_prompt, user_content, model_endpoint, profile=profile)
-    result = parse_json_response(response.text)
+    result, response = query_model_json(system_prompt, user_content, model_endpoint, profile=profile)
     return {
         "result": result,
         "prompt_version": PROMPT_VERSION,

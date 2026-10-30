@@ -12,9 +12,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import mlflow
 
-from src.tools.model_client import parse_json_response, query_model
+from src.tools.model_client import query_model_json
+from src.tools.tracing import trace
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "javaroutine_agent.md"
 PROMPT_VERSION = "1"
@@ -24,7 +24,7 @@ def _load_prompt() -> str:
     return PROMPT_PATH.read_text()
 
 
-@mlflow.trace(name="javaroutine_agent.translate")
+@trace("javaroutine_agent.translate")
 def translate_java_block(
     block_id: str,
     java_source: str,
@@ -40,8 +40,7 @@ def translate_java_block(
         f"context: {json.dumps(context)}\n\n"
         f"JAVA SOURCE:\n{java_source}"
     )
-    response = query_model(system_prompt, user_content, model_endpoint, profile=profile)
-    result = parse_json_response(response.text)
+    result, response = query_model_json(system_prompt, user_content, model_endpoint, profile=profile)
     result["cost"] = {
         "prompt_tokens": response.prompt_tokens,
         "completion_tokens": response.completion_tokens,

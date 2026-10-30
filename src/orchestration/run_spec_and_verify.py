@@ -19,7 +19,6 @@ import argparse
 import json
 import subprocess
 
-from src.agents.spec_agent import MAX_SPEC_ROUNDS as _unused  # noqa: F401  (cap lives in verifier_agent)
 from src.agents.spec_agent import run_spec_agent
 from src.agents.verifier_agent import MAX_SPEC_ROUNDS, run_verifier_agent
 from src.tools.read_raw_files import read_raw_files

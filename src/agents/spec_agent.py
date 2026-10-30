@@ -9,10 +9,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import mlflow
-
-from src.tools.model_client import parse_json_response, query_model
+from src.tools.model_client import query_model_json
 from src.tools.read_raw_files import chunk_files
+from src.tools.tracing import trace
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "spec_agent.md"
 PROMPT_VERSION = "1"
@@ -31,7 +30,7 @@ def _format_chunk(pipeline_id: str, chunk: dict[str, str]) -> str:
     return "\n".join(parts)
 
 
-@mlflow.trace(name="spec_agent.run_chunk")
+@trace("spec_agent.run_chunk")
 def _run_chunk(pipeline_id: str, chunk: dict[str, str], model_endpoint: str, profile: str) -> dict:
     system_prompt = _load_prompt()
     user_content = _format_chunk(pipeline_id, chunk) + (
@@ -40,15 +39,15 @@ def _run_chunk(pipeline_id: str, chunk: dict[str, str], model_endpoint: str, pro
         "just what's shown here; a later merge pass will reconcile "
         "cross-chunk references. Still emit the full JSON schema."
     )
-    response = query_model(system_prompt, user_content, model_endpoint, profile=profile)
+    spec, response = query_model_json(system_prompt, user_content, model_endpoint, profile=profile)
     return {
-        "spec": parse_json_response(response.text),
+        "spec": spec,
         "prompt_tokens": response.prompt_tokens,
         "completion_tokens": response.completion_tokens,
     }
 
 
-@mlflow.trace(name="spec_agent.merge")
+@trace("spec_agent.merge")
 def _merge_chunks(pipeline_id: str, partial_specs: list[dict], model_endpoint: str, profile: str) -> dict:
     system_prompt = _load_prompt()
     user_content = (
@@ -64,15 +63,15 @@ def _merge_chunks(pipeline_id: str, partial_specs: list[dict], model_endpoint: s
         "schema as the final answer.\n\n"
         + json.dumps(partial_specs, indent=2)
     )
-    response = query_model(system_prompt, user_content, model_endpoint, profile=profile)
+    spec, response = query_model_json(system_prompt, user_content, model_endpoint, profile=profile)
     return {
-        "spec": parse_json_response(response.text),
+        "spec": spec,
         "prompt_tokens": response.prompt_tokens,
         "completion_tokens": response.completion_tokens,
     }
 
 
-@mlflow.trace(name="spec_agent.run")
+@trace("spec_agent.run")
 def run_spec_agent(
     pipeline_id: str,
     raw_files: dict[str, str],

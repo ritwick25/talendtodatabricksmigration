@@ -13,6 +13,19 @@ running generated code that did this). Read/write data with plain
 PySpark DataFrame operations and `spark.sql(...)`, exactly as you would
 in any standalone Spark job.
 
+For Talend `context.*` variables (file paths, DB/table names, flags):
+read them as plain Python module-level constants with the context
+group's `dev` value from the spec as the literal default -- e.g.
+`SOURCE_DIR = "samples/talend_export_src/fixtures"`. Never
+`spark.conf.get(...)` for a custom key: on this serverless (Spark
+Connect) compute it raises `CONFIG_NOT_AVAILABLE.WITHOUT_SUGGESTION`
+even when you pass a default, confirmed by actually running generated
+code that tried this. Never `dbutils.widgets.get(...)` either -- that's
+notebook-specific and this runs as a plain Python job task with no
+notebook context. If the task is later given real job parameters
+(a `parameters` list in its job resource), read those from `sys.argv`
+instead -- but don't assume that wiring exists unless the spec says so.
+
 This module is built from a job spec (the SPEC agent's JSON) plus
 already-translated Java blocks (from the JAVAROUTINE agent, by
 block_id). On a fix pass, you

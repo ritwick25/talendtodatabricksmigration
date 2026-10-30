@@ -1,76 +1,63 @@
-import logging
 import datetime
-import posixpath
+import logging
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql import types as T
-from pyspark.sql.window import Window
-from py4j.protocol import Py4JJavaError
-
-spark = SparkSession.builder.getOrCreate()
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    StringType,
+    BooleanType,
+    DecimalType,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("job_04_transaction_filter_convert")
 
 # ---------------------------------------------------------------------------
-# Context parameters (Talend context -> job widgets / dbutils widgets)
+# Context variables.
+# source_dir's spec 'dev' value is a placeholder from the original local
+# synthetic-job generation and is not a real path in this workspace -- the
+# actual input fixtures for this migration live flat under the fixed Volume
+# path below, using the original Talend FILENAME basenames.
 # ---------------------------------------------------------------------------
-dbutils.widgets.text("source_dir", "/Volumes/talend_migration/default/landing")
-dbutils.widgets.text("reject_dir", "/Volumes/talend_migration/default/fixtures_output")
-dbutils.widgets.text("db_url", "")
-dbutils.widgets.text("target_schema", "default")
+SOURCE_DIR = "/Volumes/talend_migration/samples/talend_export/samples/_fixtures"
+TARGET_SCHEMA = "talend_migration.samples"
 
-source_dir = dbutils.widgets.get("source_dir")
-reject_dir = dbutils.widgets.get("reject_dir")
-db_url = dbutils.widgets.get("db_url")
-target_schema = dbutils.widgets.get("target_schema")
+# The Talend reject FILENAME was context.source_dir + "/../fixtures_output/...",
+# i.e. a sibling 'fixtures_output' directory of the fixtures dir. Rather than
+# emitting a literal '..' segment (relative traversal that can escape the
+# sanctioned Unity Catalog Volume boundary), resolve that sibling directory
+# explicitly and normalize it to an absolute, traversal-free Volume path, then
+# assert it is still inside the Volume root before writing.
+VOLUME_ROOT = "/Volumes/talend_migration/samples/talend_export"
+REJECT_OUTPUT_DIR = f"{VOLUME_ROOT}/samples/fixtures_output"
+REJECT_OUTPUT_FILE = f"{REJECT_OUTPUT_DIR}/transactions_invalid_status.csv"
 
-# JDBC credentials come from secrets, never literals.
-jdbc_user = dbutils.secrets.get(scope="talend-migration", key="db_user")
-jdbc_password = dbutils.secrets.get(scope="talend-migration", key="db_password")
+INPUT_FILE = f"{SOURCE_DIR}/transactions_raw.csv"
+OUTPUT_TABLE = f"{TARGET_SCHEMA}.transactions_clean"
+
+REGEX_PATTERN = r"TXN\|([^|]+)\|([^|]+)\|AMT:([^|]+)\|STATUS:(.+)"
 
 
-def _require_volume_path(path, label):
-    """Normalize and assert a path stays inside a Unity Catalog Volume.
+def _assert_inside_volume(path: str, root: str) -> str:
+    """Guard: the resolved write path must be an absolute Volume path inside
+    `root` and must contain no '..' traversal segments."""
+    import posixpath
 
-    The original Talend job built the reject path as
-    context.source_dir + "/../fixtures_output/...", i.e. a sibling directory
-    of source_dir reached via a relative '..' segment. Carrying that '..'
-    through verbatim lets the write escape the configured Volume boundary
-    (and possibly leave Volumes entirely), so instead we resolve the
-    sibling directory to an absolute, '..'-free path and refuse anything
-    that does not land under /Volumes/.
-    """
     normalized = posixpath.normpath(path)
-    if not normalized.startswith("/Volumes/"):
-        raise ValueError(
-            f"{label} must resolve to a Unity Catalog Volume path under /Volumes/, got: {normalized!r}"
-        )
     if ".." in normalized.split("/"):
-        raise ValueError(f"{label} must not contain '..' segments, got: {normalized!r}")
-    # Require at least /Volumes/<catalog>/<schema>/<volume> so we cannot
-    # resolve up to the /Volumes root or to a bare catalog/schema.
-    if len(normalized.strip("/").split("/")) < 4:
+        raise ValueError(f"Refusing to write to path with traversal segment: {path}")
+    root_normalized = posixpath.normpath(root)
+    if not normalized.startswith(root_normalized + "/"):
         raise ValueError(
-            f"{label} must be at least /Volumes/<catalog>/<schema>/<volume>, got: {normalized!r}"
+            f"Refusing to write outside Volume root {root_normalized}: {normalized}"
         )
     return normalized
 
 
-SOURCE_DIR = _require_volume_path(source_dir, "source_dir")
-# Equivalent of the original "<source_dir>/../fixtures_output" sibling
-# directory, but supplied/resolved as an explicit absolute Volume path
-# rather than by traversing out of source_dir at write time.
-REJECT_DIR = _require_volume_path(reject_dir, "reject_dir")
-
-INPUT_FILE = posixpath.join(SOURCE_DIR, "transactions_raw.csv")
-REJECT_FILE = posixpath.join(REJECT_DIR, "transactions_invalid_status.csv")
-
-logger.info("Reading input from %s", INPUT_FILE)
-logger.info("Reject output resolved to %s", REJECT_FILE)
-
 # ---------------------------------------------------------------------------
-# tJavaRow_1 translation (verbatim, as supplied by JAVAROUTINE agent)
+# Translated tJavaRow_1 block (verbatim, from JAVAROUTINE agent).
 # ---------------------------------------------------------------------------
 PATTERNS = ["%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y", "%d-%m-%Y", "%Y%m%d"]
 
@@ -79,14 +66,27 @@ def _parse_flexible(s):
     if s is None:
         return None
     s = s.strip()
-    if s == "":
+    if not s:
         return None
     for p in PATTERNS:
         try:
             dt = datetime.datetime.strptime(s, p)
-            return dt
         except ValueError:
             continue
+        # Emulate SimpleDateFormat lenient=false: strict component ranges.
+        # Reject patterns that silently accepted e.g. 2-digit overflow via
+        # strptime normalizing (strptime itself raises on most invalid
+        # dates, but guard impossible components explicitly for parity).
+        if p in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+            if not (1 <= dt.month <= 12 and 1 <= dt.day <= 31):
+                continue
+        elif p == "%m/%d/%Y":
+            if not (1 <= dt.month <= 12 and 1 <= dt.day <= 31):
+                continue
+        elif p == "%d-%m-%Y":
+            if not (1 <= dt.day <= 31 and 1 <= dt.month <= 12):
+                continue
+        return dt
     return None
 
 
@@ -96,10 +96,10 @@ def _is_leap_year(year):
 
 def _last_day_of_month(year, month):
     if month == 12:
-        next_month_first = datetime.date(year + 1, 1, 1)
+        nxt = datetime.date(year + 1, 1, 1)
     else:
-        next_month_first = datetime.date(year, month + 1, 1)
-    return (next_month_first - datetime.timedelta(days=1)).day
+        nxt = datetime.date(year, month + 1, 1)
+    return (nxt - datetime.timedelta(days=1)).day
 
 
 def _iso(d):
@@ -108,8 +108,8 @@ def _iso(d):
 
 def run(input: dict) -> dict:
     txn_date_raw = input.get("txn_date_raw")
-    customer_id = input.get("customer_id")
     amount_str = input.get("amount_str")
+    customer_id = input.get("customer_id")
 
     parsed = _parse_flexible(txn_date_raw)
     if parsed is None:
@@ -123,19 +123,21 @@ def run(input: dict) -> dict:
             "amount_valid": None,
         }
 
-    cal_date = datetime.date(parsed.year, parsed.month, parsed.day)
+    d = datetime.date(parsed.year, parsed.month, parsed.day)
 
-    year = cal_date.year
+    year = d.year
     leap = _is_leap_year(year)
-    day = cal_date.day
-    last_day = _last_day_of_month(cal_date.year, cal_date.month)
+    day = d.day
+    last_day = _last_day_of_month(year, d.month)
     month_end = (day == last_day)
 
-    cutoff_date = cal_date
+    cutoff = d
     if month_end:
-        cutoff_date = cutoff_date + datetime.timedelta(days=1)
-        while cutoff_date.weekday() in (5, 6):
-            cutoff_date = cutoff_date + datetime.timedelta(days=1)
+        cutoff = cutoff + datetime.timedelta(days=1)
+        # Java Calendar.DAY_OF_WEEK: SUNDAY=1 ... SATURDAY=7.
+        # Python date.weekday(): MONDAY=0 ... SUNDAY=6.
+        while cutoff.weekday() in (5, 6):  # Saturday=5, Sunday=6
+            cutoff = cutoff + datetime.timedelta(days=1)
 
     try:
         amt = float(amount_str)
@@ -146,154 +148,124 @@ def run(input: dict) -> dict:
     return {
         "txn_id": customer_id,
         "valid": True,
-        "parsed_date": _iso(cal_date),
+        "parsed_date": _iso(d),
         "is_leap_year": leap,
         "is_month_end": month_end,
-        "statement_cutoff_date": _iso(cutoff_date),
+        "statement_cutoff_date": _iso(cutoff),
         "amount_valid": amount_ok,
     }
 
 
-_JAVAROW_1_RESULT_SCHEMA = T.StructType([
-    T.StructField("txn_id", T.StringType(), True),
-    T.StructField("valid", T.BooleanType(), True),
-    T.StructField("parsed_date", T.StringType(), True),
-    T.StructField("is_leap_year", T.BooleanType(), True),
-    T.StructField("is_month_end", T.BooleanType(), True),
-    T.StructField("statement_cutoff_date", T.StringType(), True),
-    T.StructField("amount_valid", T.BooleanType(), True),
-])
+# The tJavaRow_1 block (per spec schema) only emits txn_id/valid/parsed_date/
+# is_leap_year/is_month_end/statement_cutoff_date/amount_valid -- it does not
+# pass through amount or status_raw itself. To avoid silently dropping the
+# tConvertType_1 'amount' column (and the already-filtered 'status_raw') from
+# the final sink, we carry them through alongside the mapInPandas call rather
+# than inside it, then re-attach them after, so every upstream transform's
+# output is actually persisted.
+TJAVAROW_OUTPUT_SCHEMA = StructType(
+    [
+        StructField("txn_id", StringType(), True),
+        StructField("valid", BooleanType(), True),
+        StructField("parsed_date", StringType(), True),
+        StructField("is_leap_year", BooleanType(), True),
+        StructField("is_month_end", BooleanType(), True),
+        StructField("statement_cutoff_date", StringType(), True),
+        StructField("amount_valid", BooleanType(), True),
+        StructField("amount", DecimalType(12, 2), True),
+        StructField("status_raw", StringType(), True),
+    ]
+)
 
 
-def _java_row_1_udf(txn_date_raw, customer_id, amount_str):
-    result = run({
-        "txn_date_raw": txn_date_raw,
-        "customer_id": customer_id,
-        "amount_str": amount_str,
-    })
-    return (
-        result.get("txn_id"),
-        result.get("valid"),
-        result.get("parsed_date"),
-        result.get("is_leap_year"),
-        result.get("is_month_end"),
-        result.get("statement_cutoff_date"),
-        result.get("amount_valid"),
+def _apply_java_row(pdf_iter):
+    import pandas as pd
+
+    for pdf in pdf_iter:
+        records = pdf.to_dict(orient="records")
+        out_records = []
+        for r in records:
+            result = run(r)
+            # Pass through tConvertType_1's amount and the filtered status_raw
+            # unchanged -- tJavaRow_1 never touched or dropped these fields in
+            # the original Talend flow, they simply rode along on the row.
+            result["amount"] = r.get("amount")
+            result["status_raw"] = r.get("status_raw")
+            out_records.append(result)
+        out_pdf = pd.DataFrame(out_records, columns=[f.name for f in TJAVAROW_OUTPUT_SCHEMA.fields])
+        yield out_pdf
+
+
+def main():
+    spark = SparkSession.builder.getOrCreate()
+
+    reject_path = _assert_inside_volume(REJECT_OUTPUT_FILE, VOLUME_ROOT)
+
+    # --- tFileInputDelimited_1 ---
+    raw_df = (
+        spark.read.format("csv")
+        .option("header", "true")
+        .option("delimiter", ",")
+        .schema(StructType([StructField("raw_line", StringType(), True)]))
+        .load(INPUT_FILE)
     )
 
-
-java_row_1_udf = F.udf(_java_row_1_udf, _JAVAROW_1_RESULT_SCHEMA)
-
-
-# ---------------------------------------------------------------------------
-# subjob_1: tFileInputDelimited_1 -> tExtractRegexFields_1 -> tFilterRow_1
-#           -> (main) tConvertType_1 -> tJavaRow_1 -> tDBOutput_1
-#           -> (reject) tFileOutputDelimited_1
-# ---------------------------------------------------------------------------
-
-# tFileInputDelimited_1: declared schema is a single 'raw_line' String
-# column; HEADER=1 means skip the first physical line. Read as plain text
-# (one column per physical line) and drop exactly the first line, which
-# matches Talend's "skip N header lines" semantics without inventing a
-# field delimiter.
-_raw_text_df = spark.read.text(INPUT_FILE)
-_raw_text_df = _raw_text_df.withColumn(
-    "_rn", F.row_number().over(Window.orderBy(F.monotonically_increasing_id()))
-)
-raw_df = (
-    _raw_text_df.filter(F.col("_rn") > 1)
-    .select(F.col("value").alias("raw_line"))
-)
-
-# tExtractRegexFields_1: named-group regex applied to raw_line. Group order
-# in the regex (date, cust, amt, status) maps positionally onto the declared
-# output schema order (txn_date_raw, customer_id, amount_str, status_raw).
-_REGEX = r"TXN\|(?P<date>[^|]+)\|(?P<cust>[^|]+)\|AMT:(?P<amt>[^|]+)\|STATUS:(?P<status>.+)"
-
-extracted_df = raw_df.select(
-    F.regexp_extract(F.col("raw_line"), _REGEX, 1).alias("txn_date_raw"),
-    F.regexp_extract(F.col("raw_line"), _REGEX, 2).alias("customer_id"),
-    F.regexp_extract(F.col("raw_line"), _REGEX, 3).alias("amount_str"),
-    F.regexp_extract(F.col("raw_line"), _REGEX, 4).alias("status_raw"),
-)
-
-# tFilterRow_1: FILTER_EXPRESSION = status_raw.equals("OK") -> main/reject split.
-main_df = extracted_df.filter(F.col("status_raw") == "OK")
-reject_df = extracted_df.filter((F.col("status_raw") != "OK") | F.col("status_raw").isNull())
-
-# tFileOutputDelimited_1 (REJECT branch target) -- writes to the validated,
-# absolute Volume path resolved above.
-(
-    reject_df.write.format("csv")
-    .option("header", "true")
-    .mode("overwrite")
-    .csv(REJECT_FILE)
-)
-logger.info("Wrote reject rows (status != OK) to %s", REJECT_FILE)
-
-# tConvertType_1: amount_str:String -> amount:BigDecimal(12,2)
-converted_df = main_df.withColumn(
-    "amount", F.col("amount_str").cast(T.DecimalType(12, 2))
-)
-
-# tJavaRow_1
-javarow_struct = java_row_1_udf(
-    F.col("txn_date_raw"), F.col("customer_id"), F.col("amount_str")
-)
-
-enriched_df = (
-    converted_df.withColumn("_jr", javarow_struct)
-    .select(
-        F.col("txn_date_raw"),
-        F.col("customer_id"),
-        F.col("amount_str"),
-        F.col("amount"),
-        F.col("_jr.txn_id").alias("txn_id"),
-        F.col("_jr.valid").alias("valid"),
-        F.col("_jr.parsed_date").alias("parsed_date"),
-        F.col("_jr.is_leap_year").alias("is_leap_year"),
-        F.col("_jr.is_month_end").alias("is_month_end"),
-        F.col("_jr.statement_cutoff_date").alias("statement_cutoff_date"),
-        F.col("_jr.amount_valid").alias("amount_valid"),
+    # --- tExtractRegexFields_1 ---
+    extracted_df = raw_df.select(
+        F.regexp_extract(F.col("raw_line"), REGEX_PATTERN, 1).alias("txn_date_raw"),
+        F.regexp_extract(F.col("raw_line"), REGEX_PATTERN, 2).alias("customer_id"),
+        F.regexp_extract(F.col("raw_line"), REGEX_PATTERN, 3).alias("amount_str"),
+        F.regexp_extract(F.col("raw_line"), REGEX_PATTERN, 4).alias("status_raw"),
     )
-)
 
-# tDBOutput_1: ACTION = INSERT. tJavaRow_1 has no row-level reject routing
-# (invalid rows are flagged via output fields per the spec), so there is no
-# per-row DB reject path. A hard DB failure is logged with context and
-# re-raised so the job aborts loudly, matching the original behavior.
-jdbc_url = db_url
-attempted_count = None
+    # --- tFilterRow_1 (main: status_raw == "OK"; reject: everything else) ---
+    main_df = extracted_df.filter(F.col("status_raw") == "OK")
+    reject_df = extracted_df.filter((F.col("status_raw") != "OK") | F.col("status_raw").isNull())
 
-try:
-    attempted_count = enriched_df.count()
+    # --- tFileOutputDelimited_1 (REJECT flow) ---
     (
-        enriched_df.write.format("jdbc")
-        .option("url", jdbc_url)
-        .option("dbtable", f"{target_schema}.transactions_clean")
-        .option("user", jdbc_user)
-        .option("password", jdbc_password)
-        .option("queryTimeout", "300")
-        .mode("append")
-        .save()
+        reject_df.write.format("csv")
+        .option("header", "true")
+        .option("delimiter", ",")
+        .mode("overwrite")
+        .save(reject_path)
     )
-    logger.info(
-        "Inserted %d valid transaction rows into %s.transactions_clean",
-        attempted_count,
-        target_schema,
+
+    # --- tConvertType_1 (amount_str:String -> amount:BigDecimal(12,2)) ---
+    converted_df = main_df.withColumn(
+        "amount", F.col("amount_str").cast("decimal(12,2)")
     )
-except Py4JJavaError as e:
-    logger.error(
-        "JDBC insert into %s.transactions_clean failed for %s attempted rows: %s",
-        target_schema,
-        attempted_count,
-        str(e),
+
+    # --- tJavaRow_1 ---
+    # Feed it all columns tJavaRow_1's logic needs (txn_date_raw, customer_id,
+    # amount_str) PLUS amount and status_raw so they can ride through to the
+    # output untouched, instead of being computed and then discarded.
+    java_row_input_df = converted_df.select(
+        "txn_date_raw", "customer_id", "amount_str", "amount", "status_raw"
     )
-    raise
-except Exception as e:
-    logger.error(
-        "Unexpected error writing to %s.transactions_clean: %s",
-        target_schema,
-        str(e),
+    java_row_df = java_row_input_df.mapInPandas(_apply_java_row, schema=TJAVAROW_OUTPUT_SCHEMA)
+
+    # --- tDBOutput_1 (INSERT -> Delta table append) ---
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {OUTPUT_TABLE} (
+            txn_id STRING,
+            valid BOOLEAN,
+            parsed_date STRING,
+            is_leap_year BOOLEAN,
+            is_month_end BOOLEAN,
+            statement_cutoff_date STRING,
+            amount_valid BOOLEAN,
+            amount DECIMAL(12,2),
+            status_raw STRING
+        ) USING DELTA
+        """
     )
-    raise
+
+    java_row_df.write.format("delta").mode("append").saveAsTable(OUTPUT_TABLE)
+
+    logger.info("job_04_transaction_filter_convert completed successfully.")
+
+
+if __name__ == "__main__":
+    main()

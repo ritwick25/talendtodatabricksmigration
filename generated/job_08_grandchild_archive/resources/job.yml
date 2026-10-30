@@ -1,0 +1,14 @@
+resources:
+  jobs:
+    mig_job_08_grandchild_archive:
+      name: mig_job_08_grandchild_archive
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ../src/job.py
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies: []

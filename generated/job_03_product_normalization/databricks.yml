@@ -1,0 +1,12 @@
+bundle:
+  name: mig_job_03_product_normalization
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

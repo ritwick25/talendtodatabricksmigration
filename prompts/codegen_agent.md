@@ -13,6 +13,16 @@ running generated code that did this). Read/write data with plain
 PySpark DataFrame operations and `spark.sql(...)`, exactly as you would
 in any standalone Spark job.
 
+Spark's `regexp_extract`/`regexp_replace`/`rlike` use JAVA regex syntax
+(same engine `java.util.regex.Pattern` uses), not Python's `re` module.
+Named capture groups are `(?<name>...)`, never Python's `(?P<name>...)`
+-- the latter raises `INVALID_PARAMETER_VALUE.PATTERN`, confirmed from
+an actual run. Safer still: `regexp_extract(str, pattern, group_index)`
+only returns one numbered group per call regardless of naming, so
+prefer plain numbered capture groups `(...)` and a group index over
+named groups entirely, to sidestep this dialect mismatch rather than
+just swapping the named-group syntax.
+
 For Talend `context.*` variables (file paths, DB/table names, flags):
 read them as plain Python module-level constants. The spec's own
 context group `dev` value is a value from the *original local*

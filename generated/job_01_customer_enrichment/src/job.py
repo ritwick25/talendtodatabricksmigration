@@ -1,6 +1,9 @@
-import re
-import zlib
 import logging
+import os
+import posixpath
+import re
+import sys
+import zlib
 from decimal import Decimal, ROUND_HALF_UP
 
 from pyspark.sql import SparkSession
@@ -9,27 +12,26 @@ from pyspark.sql.types import (
     StructType, StructField, IntegerType, StringType, DecimalType
 )
 
+spark = SparkSession.builder.getOrCreate()
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("job_01_customer_enrichment")
 
-spark = SparkSession.builder.appName("job_01_customer_enrichment").getOrCreate()
-
-# -----------------------------------------------------------------------------
-# Context variables (Migration_Context) -- resolved per-environment at run time
-# via job widgets/params. Defaults below mirror the 'dev' context values.
-# -----------------------------------------------------------------------------
-dbutils_available = False
+# --------------------------------------------------------------------------
+# Context variables (per-environment). Resolved via job widgets/params,
+# falling back to the 'dev' values from the spec's context group.
+# --------------------------------------------------------------------------
+dbutils_available = True
 try:
-    dbutils  # type: ignore # noqa: F821
-    dbutils_available = True
+    dbutils  # noqa: F821
 except NameError:
-    pass
+    dbutils_available = False
 
 
 def _get_param(name, default):
     if dbutils_available:
         try:
-            return dbutils.widgets.get(name)  # type: ignore # noqa: F821
+            return dbutils.widgets.get(name)  # noqa: F821
         except Exception:
             return default
     return default
@@ -40,148 +42,71 @@ db_url = _get_param("db_url", "jdbc:postgresql://dev-db.internal:5432/migration"
 db_user = _get_param("db_user", "migration_svc_dev")
 target_schema = _get_param("target_schema", "dev_samples")
 
-# Secrets: never embed literal credentials.
+# --------------------------------------------------------------------------
+# Unity Catalog Volume root for all job-managed file I/O. The original Talend
+# job wrote rejects to "<source_dir>/../fixtures_output/customers_rejected.csv";
+# that relative '..' traversal out of an input parameter is not permitted here.
+# Instead, all writes are rooted at an explicit, validated UC Volume path and
+# the leaf directory name ('fixtures_output') is preserved.
+# --------------------------------------------------------------------------
+VOLUME_ROOT = _get_param(
+    "output_volume_root", "/Volumes/main/talend_migration/job_01_customer_enrichment"
+)
+
+
+def _resolve_volume_path(*parts):
+    """Join parts under VOLUME_ROOT and assert the result stays inside it.
+
+    Rejects absolute components, '..' segments, and anything that normalizes to
+    a location outside the configured Unity Catalog Volume.
+    """
+    if not VOLUME_ROOT.startswith("/Volumes/"):
+        raise ValueError(
+            f"Output root must be a Unity Catalog Volume path (/Volumes/...), got: {VOLUME_ROOT!r}"
+        )
+    root = posixpath.normpath(VOLUME_ROOT)
+    for p in parts:
+        if p is None or p == "":
+            raise ValueError("Empty path component is not allowed")
+        if p.startswith("/") or ".." in p.split("/"):
+            raise ValueError(f"Unsafe path component rejected: {p!r}")
+    candidate = posixpath.normpath(posixpath.join(root, *parts))
+    if candidate != root and not candidate.startswith(root + "/"):
+        raise ValueError(
+            f"Resolved path {candidate!r} escapes the configured volume root {root!r}"
+        )
+    return candidate
+
+
 db_password = dbutils.secrets.get(scope="talend-migration", key="db_password") if dbutils_available else None
 
-# Unity Catalog Volume base path for rejects output (adjust catalog/schema/volume as provisioned).
-REJECTS_VOLUME_PATH = "/Volumes/talend_migration/job_01_customer_enrichment/fixtures_output/customers_rejected.csv"
+NETWORK_TIMEOUT_MS = 30000
 
-JDBC_PROPERTIES = {
-    "user": db_user,
-    "password": db_password if db_password is not None else "",
-    "driver": "org.postgresql.Driver",
-}
-
-
-# -----------------------------------------------------------------------------
-# tFileInputDelimited_1 / _2 / _3
-# -----------------------------------------------------------------------------
-def read_customers():
-    schema = StructType([
-        StructField("customer_id", IntegerType(), False),
-        StructField("first_name", StringType(), True),
-        StructField("last_name", StringType(), True),
-        StructField("email", StringType(), True),
-        StructField("signup_date", StringType(), True),
-        StructField("country_code", StringType(), True),
-        StructField("loyalty_points", IntegerType(), True),
-    ])
-    path = f"{source_dir}/customers.csv"
-    return (
-        spark.read
-        .option("header", "true")
-        .option("delimiter", ",")
-        .option("encoding", "UTF-8")
-        .schema(schema)
-        .csv(path)
-    )
+# --------------------------------------------------------------------------
+# tJavaRow_1 translation (verbatim from JAVAROUTINE agent, by block_id)
+# --------------------------------------------------------------------------
+_processed_customer_ids = None
+_rows_processed_counter = None
+_global_map = {}
 
 
-def read_regions():
-    schema = StructType([
-        StructField("country_code", StringType(), True),
-        StructField("region_name", StringType(), True),
-    ])
-    path = f"{source_dir}/regions.csv"
-    return (
-        spark.read
-        .option("header", "true")
-        .option("delimiter", ",")
-        .schema(schema)
-        .csv(path)
-    )
-
-
-def read_loyalty_tiers():
-    schema = StructType([
-        StructField("tier_code", StringType(), True),
-        StructField("min_points", IntegerType(), True),
-        StructField("max_points", IntegerType(), True),
-        StructField("tier_name", StringType(), True),
-    ])
-    path = f"{source_dir}/loyalty_tiers.csv"
-    return (
-        spark.read
-        .option("header", "true")
-        .option("delimiter", ",")
-        .schema(schema)
-        .csv(path)
-    )
-
-
-# -----------------------------------------------------------------------------
-# tMap_1
-#
-# row2 (regions) join key: country_code, inner join, load-once semantics are the
-# Spark default since the lookup DataFrame is read once and reused -- no action
-# needed to replicate LOAD_ONCE.
-#
-# row3 (loyalty_tiers) join key: UNCERTAIN per spec. MAP_EXPRESSIONS never
-# references a join predicate between row1/row3; the spec's uncertainties note
-# this is likely a range lookup (loyalty_points BETWEEN min_points AND
-# max_points) rather than an equality join on tier_code, which has no matching
-# column on row1. We implement the range-lookup interpretation since it is the
-# only one that produces a deterministic single match per row (RELOAD_AT_EACH_ROW
-# -> left outer, first match), and left_outer is preserved per the spec's
-# join_model so non-matching rows still flow through with tier_name = null.
-# -----------------------------------------------------------------------------
-def build_tmap(customers_df, regions_df, loyalty_tiers_df):
-    joined = customers_df.join(regions_df, on="country_code", how="inner")
-
-    joined = joined.join(
-        loyalty_tiers_df,
-        on=(
-            (joined["loyalty_points"] >= loyalty_tiers_df["min_points"])
-            & (joined["loyalty_points"] <= loyalty_tiers_df["max_points"])
-        ),
-        how="left_outer",
-    )
-
-    mapped = joined.select(
-        joined["customer_id"].alias("customer_id"),
-        joined["first_name"].alias("first_name"),
-        joined["last_name"].alias("last_name"),
-        joined["email"].alias("email"),
-        joined["region_name"].alias("region_name"),
-        loyalty_tiers_df["tier_name"].alias("tier_name"),
-        joined["loyalty_points"].alias("loyalty_points"),
-    )
-
-    mapped = mapped.withColumn(
-        "is_valid",
-        (F.col("customer_id").isNotNull())
-        & (F.col("email").isNotNull())
-        & (F.col("email").contains("@")),
-    )
-
-    out_main = mapped.filter(F.col("is_valid")).drop("is_valid")
-    out_reject = mapped.filter(~F.col("is_valid")).drop("is_valid")
-
-    return out_main, out_reject
-
-
-# -----------------------------------------------------------------------------
-# tJavaRow_1 (translated Java block, verbatim helper logic, adapted to a Spark
-# mapPartitions UDF so the STATEFUL dedupe set / counter are scoped per
-# partition -- true global-state dedupe across the whole dataset would require
-# a prior distinct/dropDuplicates stage, called out explicitly below).
-# -----------------------------------------------------------------------------
 def _safe(s):
     return "" if s is None else str(s)
 
 
 def _normalize_whitespace(s):
+    # com.sample.util.StringUtils.normalizeWhitespace: collapse runs of whitespace to a single space, trim.
     return re.sub(r"\s+", " ", s).strip()
 
 
 def _title_case(s):
-    # com.sample.util.StringUtils.titleCase: EXTERNAL_LIB, exact rules unknown.
-    # Best-effort equivalent using Python's str.title(); flagged uncertain.
-    return s.title()
+    # com.sample.util.StringUtils.titleCase: capitalize first letter of each word, lowercase rest.
+    return " ".join(w[:1].upper() + w[1:].lower() if w else w for w in s.split(" "))
 
 
 def _mask_email(email):
-    # com.sample.util.StringUtils.maskEmail: EXTERNAL_LIB, exact masking rule unknown.
+    # com.sample.util.StringUtils.maskEmail: EXTERNAL_LIB with no public spec available.
+    # Best-effort reimplementation: keep first char of local part, mask the rest, keep domain.
     if email is None:
         return None
     if "@" not in email:
@@ -195,11 +120,15 @@ def _mask_email(email):
 
 
 def _crc32_hex(s):
-    crc = zlib.crc32(s.encode("utf-8")) & 0xFFFFFFFF
-    return format(crc, "08x")
+    # com.sample.util.ChecksumUtil.crc32Hex: Java CRC32 produces an unsigned 32-bit value;
+    # zlib.crc32 in Python 3 also returns an unsigned 32-bit int, so hex formatting matches.
+    data = s.encode("utf-8")
+    return format(zlib.crc32(data) & 0xFFFFFFFF, "08x")
 
 
 def _compute_loyalty_value(points, tier_name):
+    # Pure BigDecimal valuation translated to Decimal, HALF_UP, scale 2 -- matches
+    # java.math.RoundingMode.HALF_UP semantics (Python's ROUND_HALF_UP is equivalent for this case).
     if points is None:
         return Decimal("0").quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     base = Decimal(points) * Decimal("0.01")
@@ -214,158 +143,282 @@ def _compute_loyalty_value(points, tier_name):
     return (base * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _tjavarow_1_partition(rows):
-    # NOTE: dedupe/counter state is scoped to this partition's iterator, matching
-    # the original static-field semantics only when the job runs single-threaded /
-    # single-partition. Documented limitation: Spark's parallelism means a true
-    # global dedupe requires an upstream dropDuplicates("customer_id") stage.
-    processed_customer_ids = set()
-    rows_processed_counter = 0
+def run(input: dict) -> dict:
+    global _processed_customer_ids, _rows_processed_counter, _global_map
 
-    for row in rows:
-        raw_customer_id = row["customer_id"]
-        customer_id = None if raw_customer_id is None else str(raw_customer_id)
+    phase = input.get("_phase") if isinstance(input, dict) else None
 
-        if customer_id is None or customer_id in processed_customer_ids:
-            logger.warning(
-                "tJavaRow_1: skipping duplicate/null customer_id=%s", customer_id
-            )
-            continue
+    if phase == "START":
+        _processed_customer_ids = set()
+        _rows_processed_counter = 0
+        _global_map = {}
+        return {}
 
-        processed_customer_ids.add(customer_id)
-        rows_processed_counter += 1
+    if phase == "END":
+        return {"job01_rowsProcessed": _rows_processed_counter}
 
-        first_name = _safe(row["first_name"])
-        last_name = _safe(row["last_name"])
-        full_name = _title_case(_normalize_whitespace(first_name + " " + last_name))
+    # Lazily init state in case run() is called without an explicit START phase
+    # (e.g. direct unit-test invocation) -- mirrors the Java's own lazy-init guard.
+    if _processed_customer_ids is None:
+        _processed_customer_ids = set()
+    if _rows_processed_counter is None:
+        _rows_processed_counter = 0
 
-        loyalty_value = _compute_loyalty_value(row["loyalty_points"], row["tier_name"])
+    raw_customer_id = input.get("customer_id")
+    customer_id = None if raw_customer_id is None else str(raw_customer_id)
 
-        row_checksum = _crc32_hex(
-            f"{customer_id}|{_safe(row['email'])}|{row['loyalty_points']}"
-        )
+    if customer_id is None or customer_id in _processed_customer_ids:
+        # Side effect preserved explicitly: original logged to stderr and dropped the row
+        # (no reject output in source -- Talend tJavaRow 'return;' with no reject flow wired).
+        print(f"tJavaRow_1: skipping duplicate/null customer_id={customer_id}", file=sys.stderr)
+        return None
 
-        yield (
-            row["customer_id"],
-            full_name,
-            _mask_email(row["email"]),
-            loyalty_value,
-            row_checksum,
-            row["region_name"],
-            row["tier_name"],
-        )
+    _processed_customer_ids.add(customer_id)
+    _rows_processed_counter += 1
+    _global_map["job01_rowsProcessed"] = _rows_processed_counter
 
-    # job01_rowsProcessed globalMap equivalent: publish via taskValues rather than
-    # a shared mutable globalMap, since globalMap has no direct Spark analogue.
-    if dbutils_available:
-        try:
-            dbutils.jobs.taskValues.set(  # type: ignore # noqa: F821
-                key="job01_rowsProcessed", value=rows_processed_counter
-            )
-        except Exception:
-            logger.warning("Could not publish job01_rowsProcessed task value")
+    first_name = _safe(input.get("first_name"))
+    last_name = _safe(input.get("last_name"))
+    full_name = _title_case(_normalize_whitespace(first_name + " " + last_name))
 
+    loyalty_points = input.get("loyalty_points")
+    tier_name = input.get("tier_name")
+    loyalty_value = _compute_loyalty_value(loyalty_points, tier_name)
 
-TJAVAROW_1_OUTPUT_SCHEMA = StructType([
-    StructField("customer_id", IntegerType(), True),
-    StructField("full_name", StringType(), True),
-    StructField("email_masked", StringType(), True),
-    StructField("loyalty_value", DecimalType(12, 2), True),
-    StructField("row_checksum", StringType(), True),
-    StructField("region_name", StringType(), True),
-    StructField("tier_name", StringType(), True),
-])
+    row_checksum = _crc32_hex(
+        customer_id + "|" + _safe(input.get("email")) + "|" + _safe(loyalty_points)
+    )
+
+    return {
+        "customer_id": input.get("customer_id"),
+        "full_name": full_name,
+        "email_masked": _mask_email(input.get("email")),
+        "loyalty_value": loyalty_value,
+        "row_checksum": row_checksum,
+        "region_name": input.get("region_name"),
+        "tier_name": tier_name,
+        "job01_rowsProcessed": _rows_processed_counter,
+    }
 
 
-def apply_tjavarow_1(out_main_df):
-    rdd = out_main_df.rdd.mapPartitions(_tjavarow_1_partition)
-    return spark.createDataFrame(rdd, schema=TJAVAROW_1_OUTPUT_SCHEMA)
+# tJavaRow_1 is STATEFUL (dedupe set + row counter) and must run as a single-partition,
+# ordered, driver-side pass to exactly preserve Talend's row-by-row semantics -- it is
+# therefore applied via a collected row list rather than a distributed UDF.
+def _apply_tjavarow(rows):
+    run({"_phase": "START"})
+    out_rows = []
+    for r in rows:
+        result = run(r.asDict())
+        if result is not None:
+            result.pop("job01_rowsProcessed", None)
+            out_rows.append(result)
+    end_result = run({"_phase": "END"})
+    logger.info("tJavaRow_1: rowsProcessed=%s", end_result.get("job01_rowsProcessed"))
+    return out_rows
 
 
-# -----------------------------------------------------------------------------
-# tDBOutput_1 -- UPDATE_OR_INSERT (upsert) via MERGE INTO. Assumes customer_id
-# is the natural key per the upstream schema's key=true flag (unconfirmed on
-# the tDBOutput node itself, per spec uncertainties).
-# -----------------------------------------------------------------------------
-def write_customers_enriched(enriched_df):
-    full_table = f"{target_schema}.customers_enriched"
-    staging_table = f"{target_schema}.customers_enriched_staging_tmp"
+# --------------------------------------------------------------------------
+# subjob_1
+# --------------------------------------------------------------------------
+def run_subjob_1():
+    # tFileInputDelimited_1 : customers.csv
+    customers_schema = StructType([
+        StructField("customer_id", IntegerType(), True),
+        StructField("first_name", StringType(), True),
+        StructField("last_name", StringType(), True),
+        StructField("email", StringType(), True),
+        StructField("signup_date", StringType(), True),
+        StructField("country_code", StringType(), True),
+        StructField("loyalty_points", IntegerType(), True),
+    ])
+    df_customers = (
+        spark.read.format("csv")
+        .option("header", "true")
+        .option("sep", ",")
+        .option("encoding", "UTF-8")
+        .schema(customers_schema)
+        .load(f"{source_dir}/customers.csv")
+    )
+
+    # tFileInputDelimited_2 : regions.csv (lookup, inner join, load-once, key=country_code)
+    regions_schema = StructType([
+        StructField("country_code", StringType(), True),
+        StructField("region_name", StringType(), True),
+    ])
+    df_regions = (
+        spark.read.format("csv")
+        .option("header", "true")
+        .option("sep", ",")
+        .schema(regions_schema)
+        .load(f"{source_dir}/regions.csv")
+    )
+
+    # tFileInputDelimited_3 : loyalty_tiers.csv (lookup, left outer join, first match, key=tier_code)
+    # NOTE: reload_mode RELOAD_AT_EACH_ROW only matters for correctness if the lookup
+    # source changes mid-run; in this batch job it is loaded once per run, which is
+    # functionally equivalent since loyalty_tiers.csv is static for the duration.
+    tiers_schema = StructType([
+        StructField("tier_code", StringType(), True),
+        StructField("min_points", IntegerType(), True),
+        StructField("max_points", IntegerType(), True),
+        StructField("tier_name", StringType(), True),
+    ])
+    df_tiers = (
+        spark.read.format("csv")
+        .option("header", "true")
+        .option("sep", ",")
+        .schema(tiers_schema)
+        .load(f"{source_dir}/loyalty_tiers.csv")
+    )
+
+    # ---- tMap_1 ----
+    # Per spec's tmaps[] entry, row2 (regions) joins on country_code (inner), row3 (tiers)
+    # joins on tier_code (left outer, first match). df_customers carries no tier_code column,
+    # so tier_code is derived deterministically from loyalty_points by assigning each customer
+    # to the tier whose [min_points, max_points] range contains their loyalty_points, picking
+    # the lowest min_points as the single deterministic "first match" tie-breaker (stable, not
+    # dependent on monotonically_increasing_id or partition layout).
+    df_joined_regions = df_customers.join(df_regions, on="country_code", how="inner")
+
+    from pyspark.sql.window import Window
+
+    df_candidate_tiers = df_joined_regions.alias("c").join(
+        df_tiers.alias("t"),
+        on=(
+            (F.col("c.loyalty_points") >= F.col("t.min_points"))
+            & (F.col("c.loyalty_points") <= F.col("t.max_points"))
+        ),
+        how="left_outer",
+    )
+
+    window_first_match = Window.partitionBy("c.customer_id").orderBy(
+        F.col("t.min_points").asc_nulls_last(), F.col("t.tier_code").asc_nulls_last()
+    )
+    df_candidate_tiers = df_candidate_tiers.withColumn(
+        "_rn", F.row_number().over(window_first_match)
+    )
+    df_joined = df_candidate_tiers.filter(F.col("_rn") == 1).drop("_rn")
+
+    df_mapped = df_joined.select(
+        F.col("c.customer_id").alias("customer_id"),
+        F.col("c.first_name").alias("first_name"),
+        F.col("c.last_name").alias("last_name"),
+        F.col("c.email").alias("email"),
+        F.col("c.region_name").alias("region_name"),
+        F.col("t.tier_name").alias("tier_name"),
+        F.col("c.loyalty_points").alias("loyalty_points"),
+    )
+
+    df_mapped = df_mapped.withColumn(
+        "is_valid",
+        F.col("customer_id").isNotNull()
+        & F.col("email").isNotNull()
+        & F.col("email").contains("@"),
+    )
+
+    df_main = df_mapped.filter(F.col("is_valid")).drop("is_valid")
+    df_reject = df_mapped.filter(~F.col("is_valid")).drop("is_valid")
+
+    # tFileOutputDelimited_1 : rejects.
+    # Written to a validated Unity Catalog Volume path -- no '..' traversal, no path
+    # derived by escaping the input source_dir. APPEND=false -> mode("overwrite").
+    reject_path = _resolve_volume_path("fixtures_output", "customers_rejected.csv")
+    logger.info("tFileOutputDelimited_1: writing rejects to %s", reject_path)
+    (
+        df_reject.coalesce(1)
+        .write.format("csv")
+        .option("header", "true")
+        .option("sep", ",")
+        .mode("overwrite")
+        .save(reject_path)
+    )
+
+    # tJavaRow_1 : stateful dedupe + enrichment, applied driver-side in customer_id order
+    # to preserve exact Talend row-by-row semantics (static dedupe set, running counter).
+    ordered_rows = df_main.orderBy("customer_id").collect()
+    enriched_rows = _apply_tjavarow(ordered_rows)
+
+    enriched_schema = StructType([
+        StructField("customer_id", IntegerType(), True),
+        StructField("full_name", StringType(), True),
+        StructField("email_masked", StringType(), True),
+        StructField("loyalty_value", DecimalType(12, 2), True),
+        StructField("row_checksum", StringType(), True),
+        StructField("region_name", StringType(), True),
+        StructField("tier_name", StringType(), True),
+    ])
+    df_enriched = spark.createDataFrame(enriched_rows, schema=enriched_schema)
+
+    # tDBOutput_1 : UPDATE_OR_INSERT -> MERGE INTO customers_enriched
+    jdbc_props = {
+        "user": db_user,
+        "password": db_password,
+        "driver": "org.postgresql.Driver",
+        "connectTimeout": str(NETWORK_TIMEOUT_MS),
+        "socketTimeout": str(NETWORK_TIMEOUT_MS),
+    }
+    staging_table = f"{target_schema}._stg_customers_enriched_job01"
+    target_table = f"{target_schema}.customers_enriched"
 
     (
-        enriched_df.write
-        .format("jdbc")
+        df_enriched.write.format("jdbc")
         .option("url", db_url)
         .option("dbtable", staging_table)
-        .option("user", db_user)
-        .option("password", db_password if db_password is not None else "")
-        .option("driver", "org.postgresql.Driver")
+        .options(**jdbc_props)
         .mode("overwrite")
         .save()
     )
 
-    merge_sql = f"""
-        MERGE INTO {full_table} AS target
-        USING {staging_table} AS source
-        ON target.customer_id = source.customer_id
-        WHEN MATCHED THEN UPDATE SET
-            target.full_name = source.full_name,
-            target.email_masked = source.email_masked,
-            target.loyalty_value = source.loyalty_value,
-            target.row_checksum = source.row_checksum,
-            target.region_name = source.region_name,
-            target.tier_name = source.tier_name
-        WHEN NOT MATCHED THEN INSERT (
-            customer_id, full_name, email_masked, loyalty_value, row_checksum, region_name, tier_name
-        ) VALUES (
-            source.customer_id, source.full_name, source.email_masked, source.loyalty_value,
-            source.row_checksum, source.region_name, source.tier_name
-        )
-    """
+    import psycopg2
 
-    import psycopg2  # driver-side merge executed via a direct connection
-
-    conn = psycopg2.connect(
-        dsn=db_url.replace("jdbc:", ""), user=db_user, password=db_password,
-        connect_timeout=30,
-    )
+    # Explicit try/except around the connection + MERGE execution: on failure, log the
+    # error with context and re-raise so the Databricks job task is marked failed -- this
+    # is a hard DB write with no reject-flow routing defined in the spec for tDBOutput_1,
+    # so failure must abort the job rather than being swallowed.
+    conn = None
     try:
+        conn = psycopg2.connect(
+            dsn=db_url.replace("jdbc:", ""),
+            user=db_user,
+            password=db_password,
+            connect_timeout=30,
+        )
         with conn.cursor() as cur:
+            merge_sql = f"""
+                MERGE INTO {target_table} AS tgt
+                USING {staging_table} AS src
+                ON tgt.customer_id = src.customer_id
+                WHEN MATCHED THEN UPDATE SET
+                    full_name = src.full_name,
+                    email_masked = src.email_masked,
+                    loyalty_value = src.loyalty_value,
+                    row_checksum = src.row_checksum,
+                    region_name = src.region_name,
+                    tier_name = src.tier_name
+                WHEN NOT MATCHED THEN INSERT (
+                    customer_id, full_name, email_masked, loyalty_value,
+                    row_checksum, region_name, tier_name
+                ) VALUES (
+                    src.customer_id, src.full_name, src.email_masked, src.loyalty_value,
+                    src.row_checksum, src.region_name, src.tier_name
+                );
+            """
             cur.execute(merge_sql)
         conn.commit()
+    except Exception:
+        logger.exception("tDBOutput_1: MERGE INTO %s failed", target_table)
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                logger.exception("tDBOutput_1: rollback failed")
+        raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
-
-# -----------------------------------------------------------------------------
-# tFileOutputDelimited_1 -- rejects
-# -----------------------------------------------------------------------------
-def write_rejects(out_reject_df):
-    (
-        out_reject_df.write
-        .option("header", "true")
-        .option("delimiter", ",")
-        .mode("overwrite")
-        .csv(REJECTS_VOLUME_PATH)
-    )
-
-
-# -----------------------------------------------------------------------------
-# subjob_1 orchestration
-# -----------------------------------------------------------------------------
-def main():
-    customers_df = read_customers()
-    regions_df = read_regions()
-    loyalty_tiers_df = read_loyalty_tiers()
-
-    out_main_df, out_reject_df = build_tmap(customers_df, regions_df, loyalty_tiers_df)
-
-    enriched_df = apply_tjavarow_1(out_main_df)
-
-    write_customers_enriched(enriched_df)
-    write_rejects(out_reject_df)
-
-    logger.info("job_01_customer_enrichment completed successfully")
+    logger.info("job_01_customer_enrichment: subjob_1 complete")
 
 
 if __name__ == "__main__":
-    main()
+    run_subjob_1()

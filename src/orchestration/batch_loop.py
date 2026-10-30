@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from src.orchestration import control, queue_ops
@@ -33,8 +34,32 @@ def write_batch_log(batch_id, started_at, job_ids, completed_count, failed_count
     exec_sql(statement.strip(), warehouse_id, profile)
 
 
+def _process_one(pipeline_id, profile, warehouse_id, ctl):
+    """Runs in a worker thread. Never raises -- any exception becomes a
+    synthetic FAILED-shaped result so the batch's bookkeeping (which
+    expects a status string either way) doesn't need a second except
+    path for the concurrent case."""
+    try:
+        outcome = process_job(pipeline_id, profile, warehouse_id, ctl.max_fix_cycles, ctl.per_job_run_timeout_min)
+        return pipeline_id, outcome.status, outcome, None
+    except Exception as e:
+        return pipeline_id, "FAILED", None, str(e)[:4000]
+
+
 def run_one_batch(warehouse_id: str, profile: str, ctl: control.ControlState) -> bool:
-    """Returns True if the batch halted the process."""
+    """Returns True if the batch halted the process.
+
+    Processes the batch's jobs concurrently (spec rule 1: "concurrency
+    5") since each job's work is I/O-bound (model calls, Databricks API
+    calls), not CPU-bound -- sequential processing was leaving most of
+    the wall-clock time idle on network waits. Tradeoff: once dispatched,
+    all jobs in the batch run to completion even if an early result
+    would have tripped the halt rule -- true mid-flight cancellation of
+    a running job's network calls isn't something a thread pool can do
+    cleanly, so halt/kill-switch checks happen between batches, not
+    mid-batch. The threshold logic below still only counts toward
+    halting; it just can't preempt in-flight work from this batch.
+    """
     batch_id = str(uuid.uuid4())
     pipeline_ids = queue_ops.select_next_batch(batch_id, warehouse_id, profile, batch_size=ctl.batch_size)
     if not pipeline_ids:
@@ -49,51 +74,47 @@ def run_one_batch(warehouse_id: str, profile: str, ctl: control.ControlState) ->
     halted = False
     halt_reason = None
 
-    for pipeline_id in pipeline_ids:
-        if control.is_kill_switch_set(warehouse_id, profile):
-            print("kill switch set -- stopping mid-batch")
-            queue_ops.requeue_in_progress_to_pending(warehouse_id, profile)
-            return True
+    with ThreadPoolExecutor(max_workers=len(pipeline_ids)) as pool:
+        futures = {
+            pool.submit(_process_one, pid, profile, warehouse_id, ctl): pid
+            for pid in pipeline_ids
+        }
+        for future in as_completed(futures):
+            pipeline_id, status, outcome, error = future.result()
+            print(f"-- {pipeline_id}: {status} --")
 
-        print(f"-- processing {pipeline_id} --")
-        try:
-            outcome = process_job(pipeline_id, profile, warehouse_id, ctl.max_fix_cycles, ctl.per_job_run_timeout_min)
-        except Exception as e:
-            print(f"  unhandled error processing {pipeline_id}: {e}")
-            queue_ops.update_job_status(pipeline_id, "FAILED", warehouse_id, profile, last_error=str(e)[:4000], notes="unhandled exception in process_job")
-            failed_count += 1
-            if failed_count >= ctl.halt_threshold:
-                halted, halt_reason = True, f"{failed_count} jobs FAILED in this batch (threshold {ctl.halt_threshold})"
-                break
-            continue
+            if outcome is None:  # unhandled exception path
+                queue_ops.update_job_status(pipeline_id, "FAILED", warehouse_id, profile, last_error=error, notes="unhandled exception in process_job")
+                failed_count += 1
+                infra_streak = 0
+                if failed_count >= ctl.halt_threshold:
+                    halted, halt_reason = True, f"{failed_count} jobs FAILED in this batch (threshold {ctl.halt_threshold})"
+                continue
 
-        print(f"  outcome: {outcome.status}")
-        if outcome.status == "COMPLETED":
-            completed_count += 1
-            infra_streak = 0
-            queue_ops.update_job_status(
-                pipeline_id, "COMPLETED", warehouse_id, profile,
-                fix_attempts=len(outcome.attempts) - 1,
-                java_uncertain=getattr(outcome, "java_uncertain", False),
-                spec_uncertain=getattr(outcome, "spec_uncertain", False),
-            )
-        elif outcome.status == "FAILED":
-            failed_count += 1
-            infra_streak = 0
-            queue_ops.update_job_status(
-                pipeline_id, "FAILED", warehouse_id, profile,
-                fix_attempts=len(outcome.attempts),
-                last_error=(outcome.diagnosis or "")[:4000],
-            )
-            if failed_count >= ctl.halt_threshold:
-                halted, halt_reason = True, f"{failed_count} jobs FAILED in this batch (threshold {ctl.halt_threshold})"
-                break
-        elif outcome.status == "INFRA_RETRY_EXHAUSTED":
-            infra_streak += 1
-            queue_ops.update_job_status(pipeline_id, "PENDING", warehouse_id, profile, last_error=(outcome.diagnosis or "")[:4000])
-            if infra_streak >= 3:
-                halted, halt_reason = True, f"{infra_streak} consecutive infra failures"
-                break
+            if status == "COMPLETED":
+                completed_count += 1
+                infra_streak = 0
+                queue_ops.update_job_status(
+                    pipeline_id, "COMPLETED", warehouse_id, profile,
+                    fix_attempts=len(outcome.attempts) - 1,
+                    java_uncertain=outcome.java_uncertain,
+                    spec_uncertain=outcome.spec_uncertain,
+                )
+            elif status == "FAILED":
+                failed_count += 1
+                infra_streak = 0
+                queue_ops.update_job_status(
+                    pipeline_id, "FAILED", warehouse_id, profile,
+                    fix_attempts=len(outcome.attempts),
+                    last_error=(outcome.diagnosis or "")[:4000],
+                )
+                if failed_count >= ctl.halt_threshold:
+                    halted, halt_reason = True, f"{failed_count} jobs FAILED in this batch (threshold {ctl.halt_threshold})"
+            elif status == "INFRA_RETRY_EXHAUSTED":
+                infra_streak += 1
+                queue_ops.update_job_status(pipeline_id, "PENDING", warehouse_id, profile, last_error=(outcome.diagnosis or "")[:4000])
+                if infra_streak >= 3:
+                    halted, halt_reason = True, f"{infra_streak} consecutive infra failures"
 
     write_batch_log(batch_id, started_at, pipeline_ids, completed_count, failed_count, halted, halt_reason, warehouse_id, profile)
 

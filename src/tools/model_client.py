@@ -111,15 +111,24 @@ def parse_json_response(text: str) -> dict:
         if stripped.startswith("json"):
             stripped = stripped[4:]
     stripped = stripped.strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        repaired = _TRAILING_COMMA_RE.sub(r"\1", stripped)
+    attempts = (
+        lambda s: json.loads(s),
+        # strict=False permits raw control characters (unescaped literal
+        # newlines/tabs) inside string values -- happens occasionally
+        # when a model emits code containing real newlines instead of
+        # \n inside a JSON string.
+        lambda s: json.loads(s, strict=False),
+        lambda s: json.loads(_TRAILING_COMMA_RE.sub(r"\1", s)),
+        lambda s: json.loads(_TRAILING_COMMA_RE.sub(r"\1", s), strict=False),
+    )
+    last_error = None
+    for attempt in attempts:
         try:
-            return json.loads(repaired)
+            return attempt(stripped)
         except json.JSONDecodeError as e:
-            e.response_text = text  # noqa: B018 -- attached for callers/logging
-            raise
+            last_error = e
+    last_error.response_text = text  # noqa: B018 -- attached for callers/logging
+    raise last_error
 
 
 def _looks_truncated(error: json.JSONDecodeError, text_length: int) -> bool:

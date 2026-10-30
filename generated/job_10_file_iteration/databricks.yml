@@ -1,0 +1,12 @@
+bundle:
+  name: mig_job_10_file_iteration
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

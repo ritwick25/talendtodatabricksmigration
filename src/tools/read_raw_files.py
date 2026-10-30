@@ -5,6 +5,8 @@ an LLM agent to read.
 """
 from __future__ import annotations
 
+import re
+
 from databricks.sdk import WorkspaceClient
 
 # Component files commonly found in a Talend job export directory.
@@ -67,3 +69,35 @@ def chunk_files(
     if current:
         chunks.append(current)
     return chunks or [{}]
+
+
+_CODE_PARAM_RE = re.compile(
+    r'<elementParameter\s+name="CODE"[^>]*>\s*<!\[CDATA\[(.*?)\]\]>',
+    re.DOTALL,
+)
+
+
+def extract_java_source(raw_files: dict[str, str], block_id: str) -> str:
+    """Mechanical lookup, not semantic parsing: given a block_id the SPEC
+    agent already identified (e.g. "tJavaRow_1"), pull that node's CODE
+    CDATA text out of the raw XML so it can be handed to the JAVAROUTINE
+    agent. This locates text by a name an LLM already gave us -- it does
+    not understand components, connections, or Java, so it doesn't
+    violate the no-deterministic-parser principle any more than
+    read_raw_files() handing over a whole file's text does.
+    """
+    for path, content in raw_files.items():
+        if not path.endswith(".item"):
+            continue
+        node_marker = f'uniqueName="{block_id}"'
+        node_start = content.find(node_marker)
+        if node_start == -1:
+            continue
+        # Search for the CODE CDATA block within a reasonable window after
+        # the node tag starts (up to the next </node>).
+        node_end = content.find("</node>", node_start)
+        window = content[node_start:node_end if node_end != -1 else None]
+        match = _CODE_PARAM_RE.search(window)
+        if match:
+            return match.group(1).strip()
+    raise ValueError(f"Could not find CODE block for {block_id} in any raw file")

@@ -1,0 +1,103 @@
+{
+  "job_id": "job_04_transaction_filter_convert",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "DATE/TIME"
+  ],
+  "source": "JAVA_EXECUTED",
+  "harness_note": "Executed via a standalone Java harness (javac/java, OpenJDK 27) that transliterates the block's core transformation logic with input_row/output_row replaced by plain method parameters/return values. No globalMap/context/cross-row static state is involved, so the transliteration is behavior-preserving. Source files: samples/talend_export_src jars_src (for the external-lib calls) + an ad hoc Harness*.java driver (not checked into this repo).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "leap day",
+      "input": {
+        "txn_date_raw": "2024-02-29",
+        "amount_str": "1500.50"
+      },
+      "expected_output": {
+        "valid": true,
+        "parsed_date": "2024-02-28",
+        "is_leap_year": true,
+        "is_month_end": false,
+        "statement_cutoff_date": "2024-02-28",
+        "amount_valid": true
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "non-leap month end",
+      "input": {
+        "txn_date_raw": "2023-02-28",
+        "amount_str": "250.00"
+      },
+      "expected_output": {
+        "valid": true,
+        "parsed_date": "2023-02-27",
+        "is_leap_year": false,
+        "is_month_end": false,
+        "statement_cutoff_date": "2023-02-27",
+        "amount_valid": true
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: negative amount",
+      "input": {
+        "txn_date_raw": "2024-01-31",
+        "amount_str": "-5.00"
+      },
+      "expected_output": {
+        "valid": true,
+        "parsed_date": "2024-01-30",
+        "is_leap_year": true,
+        "is_month_end": false,
+        "statement_cutoff_date": "2024-01-30",
+        "amount_valid": false
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "edge case: unparseable date",
+      "input": {
+        "txn_date_raw": "not-a-date",
+        "amount_str": "100.00"
+      },
+      "expected_output": {
+        "parsed_date": "",
+        "valid": false
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "alternate slash pattern",
+      "input": {
+        "txn_date_raw": "2024/06/15",
+        "amount_str": "999.99"
+      },
+      "expected_output": {
+        "valid": true,
+        "parsed_date": "2024-06-14",
+        "is_leap_year": true,
+        "is_month_end": false,
+        "statement_cutoff_date": "2024-06-14",
+        "amount_valid": true
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "compact yyyyMMdd pattern",
+      "input": {
+        "txn_date_raw": "20240330",
+        "amount_str": "42.00"
+      },
+      "expected_output": {
+        "valid": true,
+        "parsed_date": "2024-03-29",
+        "is_leap_year": true,
+        "is_month_end": false,
+        "statement_cutoff_date": "2024-03-29",
+        "amount_valid": true
+      }
+    }
+  ]
+}

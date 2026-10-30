@@ -1,0 +1,81 @@
+{
+  "job_id": "job_20_talend_internals_routine_chain",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "TALEND INTERNALS"
+  ],
+  "source": "DERIVED",
+  "derivation_note": "DERIVED: reads context.max_claim_amount and writes/reads a globalMap fatal flag that a downstream RUN_IF connection consumes, and calls the custom routine routines.ClaimRoutines.validateClaim (which calls formatClaimCode -- routine-calling-routine). Reasoned through using the Dev context value max_claim_amount=5000.",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "claim well within threshold -> no code",
+      "input": {
+        "claim_id": "CLM1",
+        "claim_amount": "1200.00",
+        "max_claim_amount": 5000
+      },
+      "expected_output": {
+        "claim_id": "CLM1",
+        "claim_code": "",
+        "_note": "1200 <= 5000 and not negative -> validateClaim returns null"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "edge case: claim far exceeds 10x threshold -> FATAL, throws and is caught by Talend die/warn machinery",
+      "input": {
+        "claim_id": "CLM2",
+        "claim_amount": "75000.00",
+        "max_claim_amount": 5000
+      },
+      "expected_output": {
+        "claim_code": "CLM2:Fatal Over Limit",
+        "fatal": true,
+        "_note": "75000 > 5000*10=50000 -> formatClaimCode(claimId,'FATAL_OVER_LIMIT') -> 'CLM2:Fatal Over Limit' (StringUtils.titleCase on 'FATAL OVER LIMIT'.toLowerCase-then-titlecased per titleCase's own logic); globalMap job20_fatalFlag set true; block throws RuntimeException so no output_row is actually emitted for this row -- the claim_code shown here is what the routine call computed before the throw"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: negative claim amount",
+      "input": {
+        "claim_id": "CLM3",
+        "claim_amount": "-50.00",
+        "max_claim_amount": 5000
+      },
+      "expected_output": {
+        "claim_id": "CLM3",
+        "claim_code": "CLM3:Negative",
+        "_note": "amount<0 matches the NEGATIVE branch first (checked before the over-threshold branches)"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "claim above threshold but below the 10x fatal cutoff -> REVIEW",
+      "input": {
+        "claim_id": "CLM4",
+        "claim_amount": "6000.00",
+        "max_claim_amount": 5000
+      },
+      "expected_output": {
+        "claim_id": "CLM4",
+        "claim_code": "CLM4:Review",
+        "_note": "6000 > 5000 but not > 50000 -> REVIEW branch"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "Prod context doubles the threshold to 10000",
+      "input": {
+        "claim_id": "CLM5",
+        "claim_amount": "8000.00",
+        "max_claim_amount": 10000
+      },
+      "expected_output": {
+        "claim_id": "CLM5",
+        "claim_code": "",
+        "_note": "under Prod context (max_claim_amount=10000) the same 8000 claim that would be REVIEW in Dev/Test is within bounds -> null code"
+      }
+    }
+  ]
+}

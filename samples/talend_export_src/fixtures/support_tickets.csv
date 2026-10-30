@@ -1,0 +1,4 @@
+ticket_id,raw_subject,tag_string
+T1,[URGENT] Re: Order#12345 - refund request,"billing,refund,,urgent,"
+T2,Re: Order#99887 shipment delay,"shipping,,delay"
+T3,[LOW] General question,question

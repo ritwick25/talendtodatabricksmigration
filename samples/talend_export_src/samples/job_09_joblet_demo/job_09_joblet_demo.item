@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Address Standardization via Joblet" jobId="job_09_joblet_demo" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Reads raw addresses and standardizes them by delegating to a reusable joblet (AddressStandardizationJoblet) that trims/titlecases street and city and upper-cases state/country.</description>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/addresses_raw.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="address_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="street" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="city" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="state" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="zip" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="country" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tAddressStandardizationJoblet" componentVersion="0.102" posX="320" posY="80" uniqueName="tAddressStandardizationJoblet_1">
+      <elementParameter name="JOBLET_REF" field="TEXT" value="AddressStandardizationJoblet"/>
+      <metadata connector="FLOW">
+        <column name="address_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="street_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="city_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="state_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="zip" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="country_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="560" posY="80" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/addresses_standardized.csv&quot;"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tAddressStandardizationJoblet_1" connectorName="FLOW"/>
+    <connection source="tAddressStandardizationJoblet_1" target="tFileOutputDelimited_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

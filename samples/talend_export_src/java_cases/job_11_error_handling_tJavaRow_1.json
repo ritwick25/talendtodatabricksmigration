@@ -1,0 +1,96 @@
+{
+  "job_id": "job_11_error_handling",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "CONTROL FLOW"
+  ],
+  "source": "DERIVED",
+  "derivation_note": "DERIVED: the recursive retry/switch/labeled-break logic itself is pure (and the sibling CONTROL FLOW occurrence in job_19 IS executed standalone to validate that style of logic), but this specific block's errorCount accumulates in globalMap across rows and is read by downstream RUN_IF connections, so the block as a whole is Talend-coupled. Reasoned through assuming errorCount starts at 0 for a fresh run.",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "OK status, no retries needed",
+      "input": {
+        "row_id": "R1",
+        "status_code": "OK",
+        "amount": "100.00"
+      },
+      "expected_output": {
+        "row_id": "R1",
+        "level": 0,
+        "anomaly": false,
+        "attempts": 0,
+        "error_message": "",
+        "_note": "level 0 != 2 -> retryWithBackoff returns immediately with attempt=0"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "RETRY status",
+      "input": {
+        "row_id": "R2",
+        "status_code": "RETRY",
+        "amount": "0.00"
+      },
+      "expected_output": {
+        "row_id": "R2",
+        "level": 1,
+        "anomaly": false,
+        "attempts": 0,
+        "error_message": "",
+        "_note": "level 1 != 2 -> returns attempt=0 immediately; amount=0 is not negative so anomaly matrix cell (1,0) stays false"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: FAIL status exhausts retries and throws",
+      "input": {
+        "row_id": "R3",
+        "status_code": "FAIL",
+        "amount": "-5.00"
+      },
+      "expected_output": {
+        "row_id": "R3",
+        "level": 2,
+        "anomaly": true,
+        "attempts": -1,
+        "error_message": "exceeded max retries at level=2",
+        "_note": "level 2 recurses attempt 0->1->2->3, throws at attempt>=3; amount<0 so conflict cell (2,1)=true -> anomaly=true; errorCount becomes 1, globalMap.put('errorCount',1)"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "UNKNOWN status_code falls to default switch branch",
+      "input": {
+        "row_id": "R4",
+        "status_code": "UNKNOWN",
+        "amount": "50.00"
+      },
+      "expected_output": {
+        "row_id": "R4",
+        "level": 3,
+        "anomaly": false,
+        "attempts": 0,
+        "error_message": "",
+        "_note": "default case -> level=3, which is never 2 so no recursion/throw"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "edge case: null status_code falls to default branch too",
+      "input": {
+        "row_id": "R5",
+        "status_code": null,
+        "amount": "10.00"
+      },
+      "expected_output": {
+        "row_id": "R5",
+        "level": 3,
+        "anomaly": false,
+        "attempts": 0,
+        "error_message": "",
+        "_note": "switch on (status_code==null?\"\":status_code) -> empty string matches default -> level=3"
+      }
+    }
+  ]
+}

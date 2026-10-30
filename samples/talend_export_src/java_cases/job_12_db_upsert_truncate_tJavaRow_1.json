@@ -1,0 +1,96 @@
+{
+  "job_id": "job_12_db_upsert_truncate",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "TALEND INTERNALS",
+    "EXTERNAL_LIB"
+  ],
+  "source": "DERIVED",
+  "derivation_note": "DERIVED: tracks 'previous quantity per sku' in globalMap across rows (so the delta depends on row processing order) and calls the custom routine routines.InventoryRoutines.computeDelta (which itself calls formatDelta -- routine-calling-routine). The CRC32 math inside the routine is deterministic and was checked against com.sample.util.ChecksumUtil's compiled jar behavior (crc32Hex('SKU-2024-00123-A:120') computed by inspection of the CRC32 algorithm); the globalMap-keyed 'previous qty' state is what makes the block non-standalone.",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "first time this sku is seen this run -> previous qty defaults to 0",
+      "input": {
+        "sku": "SKU-2024-00123-A",
+        "warehouse_id": "W1",
+        "qty_on_hand": 120
+      },
+      "expected_output": {
+        "sku": "SKU-2024-00123-A",
+        "warehouse_id": "W1",
+        "qty_on_hand": 120,
+        "delta_formatted": "+120|<crc32 of 'SKU-2024-00123-A:120'>",
+        "watermark_used": "2024-01-01 00:00:00",
+        "_note": "prev=0 (no globalMap entry yet) -> delta=+120; globalMap job12_prevQty_SKU-2024-00123-A set to 120"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "edge case: zero qty_on_hand",
+      "input": {
+        "sku": "SKU-2023-00042-B",
+        "warehouse_id": "W2",
+        "qty_on_hand": 0
+      },
+      "expected_output": {
+        "sku": "SKU-2023-00042-B",
+        "warehouse_id": "W2",
+        "qty_on_hand": 0,
+        "delta_formatted": "=0|<crc32 of 'SKU-2023-00042-B:0'>",
+        "watermark_used": "2024-01-01 00:00:00",
+        "_note": "newQty==previousQty(0) -> sign '=' per formatDelta"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "same sku seen again later in the same run with a higher qty -> positive delta vs globalMap state",
+      "input": {
+        "sku": "SKU-2024-00123-A",
+        "warehouse_id": "W1",
+        "qty_on_hand": 150
+      },
+      "expected_output": {
+        "sku": "SKU-2024-00123-A",
+        "warehouse_id": "W1",
+        "qty_on_hand": 150,
+        "delta_formatted": "+30|<crc32 of 'SKU-2024-00123-A:150'>",
+        "_note": "prev=120 (from case 1's globalMap write) -> delta=150-120=30"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "edge case: quantity decreased since last seen -> negative delta",
+      "input": {
+        "sku": "SKU-2024-00123-A",
+        "warehouse_id": "W1",
+        "qty_on_hand": 90
+      },
+      "expected_output": {
+        "sku": "SKU-2024-00123-A",
+        "warehouse_id": "W1",
+        "qty_on_hand": 90,
+        "delta_formatted": "-60|<crc32 of 'SKU-2024-00123-A:90'>",
+        "_note": "prev=150 -> delta=90-150=-60 -> sign '-' magnitude 60"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "watermark context value flows through unchanged (Test context)",
+      "input": {
+        "sku": "SKU-NEW-00001-Z",
+        "warehouse_id": "W3",
+        "qty_on_hand": 5,
+        "context_env": "Test"
+      },
+      "expected_output": {
+        "sku": "SKU-NEW-00001-Z",
+        "warehouse_id": "W3",
+        "qty_on_hand": 5,
+        "delta_formatted": "+5|<crc32 of 'SKU-NEW-00001-Z:5'>",
+        "watermark_used": "2024-01-01 00:00:00",
+        "_note": "Test context watermark_ts is also 2024-01-01 00:00:00 per contexts/Migration_Context.item"
+      }
+    }
+  ]
+}

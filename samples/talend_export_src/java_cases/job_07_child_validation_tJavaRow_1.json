@@ -1,0 +1,88 @@
+{
+  "job_id": "job_07_child_validation",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "TALEND INTERNALS"
+  ],
+  "source": "DERIVED",
+  "derivation_note": "DERIVED: depends on globalMap (running valid/invalid counters, batchRunId read-back), context.max_retries, and the Talend built-in routine Numeric.sequence(name, start, step) whose counter state is process-global and not reproducible by a standalone harness without reimplementing Talend's routine runtime. Reasoned through assuming a fresh sequence 'job07ValidationSeq' starting at 1, step 1, and context.max_retries=3 (Dev context).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "first valid row",
+      "input": {
+        "row_id": "V1",
+        "amount": "120.00",
+        "seq_call_number": 1
+      },
+      "expected_output": {
+        "row_id": "V1",
+        "validation_seq": 1,
+        "is_valid": true,
+        "customer_batch_id": "BATCH001",
+        "_note": "amount>0 -> valid; validRowCount becomes 1; Numeric.sequence 1st call returns 1"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "edge case: negative amount -> invalid",
+      "input": {
+        "row_id": "V2",
+        "amount": "-10.00",
+        "seq_call_number": 2
+      },
+      "expected_output": {
+        "row_id": "V2",
+        "validation_seq": 2,
+        "is_valid": false,
+        "_note": "amount<=0 -> invalidRowCount becomes 1, globalMap job07_invalidRowCount=1, System.err warn logged"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: null amount -> invalid (NPE-safe check)",
+      "input": {
+        "row_id": "V3",
+        "amount": null,
+        "seq_call_number": 3
+      },
+      "expected_output": {
+        "row_id": "V3",
+        "validation_seq": 3,
+        "is_valid": false,
+        "_note": "input_row.amount==null short-circuits the '&& ...doubleValue()>0' check via Java's && before dereferencing -> ok=false, invalidRowCount becomes 2"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "valid row in a second batch id",
+      "input": {
+        "row_id": "V4",
+        "amount": "999.99",
+        "seq_call_number": 4
+      },
+      "expected_output": {
+        "row_id": "V4",
+        "validation_seq": 4,
+        "is_valid": true,
+        "customer_batch_id": "BATCH002",
+        "_note": "validRowCount becomes 2 (counts are per-run, not per customer_batch_id)"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "sequence counter keeps advancing across both valid and invalid rows",
+      "input": {
+        "row_id": "V5",
+        "amount": "50.00",
+        "seq_call_number": 5
+      },
+      "expected_output": {
+        "row_id": "V5",
+        "validation_seq": 5,
+        "is_valid": true,
+        "_note": "Numeric.sequence is called unconditionally before the validity check, so invalid rows still consume a sequence number"
+      }
+    }
+  ]
+}

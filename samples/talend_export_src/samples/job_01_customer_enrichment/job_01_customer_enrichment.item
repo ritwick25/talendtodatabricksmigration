@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Customer Enrichment" jobId="job_01_customer_enrichment" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Enriches raw customer extracts with region (inner join, load-once) and loyalty-tier (left join, reload-at-each-row) lookups via tMap, computes a masked email and a BigDecimal loyalty valuation in Java, dedupes by customer_id, and upserts into customers_enriched.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/customers.csv&quot;"/>
+      <elementParameter name="FIELDSEPARATOR" field="TEXT" value=","/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <elementParameter name="ENCODING" field="TEXT" value="UTF-8"/>
+      <metadata connector="FLOW">
+        <column name="customer_id" type="id_Integer" length="10" precision="" nullable="false" key="true"/>
+        <column name="first_name" type="id_String" length="60" precision="" nullable="true" key="false"/>
+        <column name="last_name" type="id_String" length="60" precision="" nullable="true" key="false"/>
+        <column name="email" type="id_String" length="120" precision="" nullable="true" key="false"/>
+        <column name="signup_date" type="id_String" length="10" precision="" nullable="true" key="false"/>
+        <column name="country_code" type="id_String" length="2" precision="" nullable="true" key="false"/>
+        <column name="loyalty_points" type="id_Integer" length="10" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="220" uniqueName="tFileInputDelimited_2">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/regions.csv&quot;"/>
+      <elementParameter name="FIELDSEPARATOR" field="TEXT" value=","/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="country_code" type="id_String" length="2" precision="" nullable="true" key="true"/>
+        <column name="region_name" type="id_String" length="40" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="360" uniqueName="tFileInputDelimited_3">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/loyalty_tiers.csv&quot;"/>
+      <elementParameter name="FIELDSEPARATOR" field="TEXT" value=","/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="tier_code" type="id_String" length="4" precision="" nullable="true" key="true"/>
+        <column name="min_points" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="max_points" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="tier_name" type="id_String" length="20" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tMap" componentVersion="0.102" posX="320" posY="150" uniqueName="tMap_1">
+      <elementParameter name="MAP_EXPRESSIONS" field="TEXT" value="out_main.customer_id = row1.customer_id; out_main.first_name = row1.first_name; out_main.last_name = row1.last_name; out_main.email = row1.email; out_main.region_name = row2.region_name; out_main.tier_name = row3.tier_name; out_main.loyalty_points = row1.loyalty_points;"/>
+      <elementParameter name="LOOKUP_row2_JOIN_MODE" field="TEXT" value="Inner Join"/>
+      <elementParameter name="LOOKUP_row2_MATCH_MODE" field="TEXT" value="unique match"/>
+      <elementParameter name="LOOKUP_row2_LOAD_MODE" field="TEXT" value="LOAD_ONCE"/>
+      <elementParameter name="LOOKUP_row3_JOIN_MODE" field="TEXT" value="Left Outer Join"/>
+      <elementParameter name="LOOKUP_row3_MATCH_MODE" field="TEXT" value="first match"/>
+      <elementParameter name="LOOKUP_row3_LOAD_MODE" field="TEXT" value="RELOAD_AT_EACH_ROW"/>
+      <elementParameter name="VAR_expr_is_valid" field="TEXT" value="row1.customer_id != null &amp;&amp; row1.email != null &amp;&amp; row1.email.contains(&quot;@&quot;)"/>
+      <elementParameter name="FILTER_out_main" field="TEXT" value="is_valid"/>
+      <elementParameter name="FILTER_out_reject" field="TEXT" value="!is_valid"/>
+      <metadata connector="FLOW">
+        <column name="customer_id" type="id_Integer" length="" precision="" nullable="true" key="true"/>
+        <column name="first_name" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="last_name" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="email" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="region_name" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="tier_name" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="loyalty_points" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="560" posY="100" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- enrich + dedupe + valuate customer rows after the tMap lookups.
+// Patterns: STATEFUL (static dedupe set + running counter), NUMERIC (BigDecimal loyalty
+// valuation with setScale/RoundingMode), EXTERNAL_LIB (com.sample.util.StringUtils / ChecksumUtil).
+// Talend-coupled: reads input_row / writes output_row, publishes a counter to globalMap.
+
+if (processedCustomerIds == null) {
+    processedCustomerIds = new java.util.HashSet<String>();
+}
+if (rowsProcessedCounter == null) {
+    rowsProcessedCounter = new java.util.concurrent.atomic.AtomicLong(0L);
+}
+
+String customerId = input_row.customer_id == null ? null : String.valueOf(input_row.customer_id);
+if (customerId == null || processedCustomerIds.contains(customerId)) {
+    System.err.println("tJavaRow_1: skipping duplicate/null customer_id=" + customerId);
+    return;
+}
+processedCustomerIds.add(customerId);
+rowsProcessedCounter.incrementAndGet();
+globalMap.put("job01_rowsProcessed", rowsProcessedCounter.get());
+
+String fullName = com.sample.util.StringUtils.titleCase(
+        com.sample.util.StringUtils.normalizeWhitespace(
+                safe(input_row.first_name) + " " + safe(input_row.last_name)));
+
+java.math.BigDecimal loyaltyValue = computeLoyaltyValue(input_row.loyalty_points, input_row.tier_name);
+String rowChecksum = com.sample.util.ChecksumUtil.crc32Hex(
+        customerId + "|" + safe(input_row.email) + "|" + input_row.loyalty_points);
+
+output_row.customer_id = input_row.customer_id;
+output_row.full_name = fullName;
+output_row.email_masked = com.sample.util.StringUtils.maskEmail(input_row.email);
+output_row.loyalty_value = loyaltyValue;
+output_row.row_checksum = rowChecksum;
+output_row.region_name = input_row.region_name;
+output_row.tier_name = input_row.tier_name;
+
+/**
+ * Null-safe string accessor; avoids NPEs on partially-populated rows (see fixtures/customers.csv
+ * row 1004 which has a null first_name).
+ */
+private String safe(String s) {
+    return s == null ? "" : s;
+}
+
+/**
+ * Pure BigDecimal valuation helper: base = points * 0.01, scaled by a tier multiplier,
+ * rounded HALF_UP to 2 decimal places. Mirrors the logic executed standalone in
+ * java_cases/job_01_customer_enrichment_tJavaRow_1.json reasoning (DERIVED, since the block
+ * as a whole depends on static dedupe state + globalMap publishing, not just this method).
+ */
+private java.math.BigDecimal computeLoyaltyValue(Integer points, String tierName) {
+    if (points == null) {
+        return java.math.BigDecimal.ZERO.setScale(2, java.math.RoundingMode.HALF_UP);
+    }
+    java.math.BigDecimal base = new java.math.BigDecimal(points).multiply(new java.math.BigDecimal("0.01"));
+    java.math.BigDecimal multiplier;
+    if ("Platinum".equalsIgnoreCase(tierName)) {
+        multiplier = new java.math.BigDecimal("1.50");
+    } else if ("Gold".equalsIgnoreCase(tierName)) {
+        multiplier = new java.math.BigDecimal("1.25");
+    } else if (tierName == null) {
+        multiplier = java.math.BigDecimal.ZERO;
+    } else {
+        multiplier = java.math.BigDecimal.ONE;
+    }
+    return base.multiply(multiplier).setScale(2, java.math.RoundingMode.HALF_UP);
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="customer_id" type="id_Integer" length="" precision="" nullable="true" key="true"/>
+        <column name="full_name" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="email_masked" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="loyalty_value" type="id_BigDecimal" length="12" precision="2" nullable="true" key="false"/>
+        <column name="row_checksum" type="id_String" length="8" precision="" nullable="true" key="false"/>
+        <column name="region_name" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="tier_name" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="800" posY="100" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="customers_enriched"/>
+      <elementParameter name="ACTION" field="TEXT" value="UPDATE_OR_INSERT"/>
+      <elementParameter name="DBTYPE" field="TEXT" value="PostgreSQL"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="USER" field="TEXT" value="(String)context.db_user"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="560" posY="300" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/customers_rejected.csv&quot;"/>
+      <elementParameter name="APPEND" field="TEXT" value="false"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tMap_1" connectorName="FLOW" label="row1"/>
+    <connection source="tFileInputDelimited_2" target="tMap_1" connectorName="LOOKUP" label="row2"/>
+    <connection source="tFileInputDelimited_3" target="tMap_1" connectorName="LOOKUP" label="row3"/>
+    <connection source="tMap_1" target="tJavaRow_1" connectorName="FLOW" label="out_main"/>
+    <connection source="tMap_1" target="tFileOutputDelimited_1" connectorName="REJECT" label="out_reject"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

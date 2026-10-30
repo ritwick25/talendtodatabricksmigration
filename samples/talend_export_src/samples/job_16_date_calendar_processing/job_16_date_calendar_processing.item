@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Subscription Billing Date Calculation" jobId="job_16_date_calendar_processing" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Parses mixed-format subscription event timestamps per-timezone with a DATE/TIME Java block (SimpleDateFormat fallback chain, Calendar arithmetic, month-end clamp, leap-year anniversary flag) and inserts the computed next billing date into subscription_billing_schedule.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/subscription_events.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="sub_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="event_type" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="event_ts_raw" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="timezone_code" type="id_String" length="4" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- Pattern: DATE/TIME (SimpleDateFormat multi-pattern fallback, per-timezone
+// Calendar arithmetic, month-end clamp for next_billing_date, leap-year anniversary flag).
+// Pure given its row fields (no globalMap/context dependency) -- executed standalone in
+// java_cases/job_16_date_calendar_processing_tJavaRow_1.json (JAVA_EXECUTED).
+
+java.util.Date parsed = parseFlexible(input_row.event_ts_raw, zoneFor(input_row.timezone_code));
+if (parsed == null) {
+    output_row.sub_id = input_row.sub_id;
+    output_row.valid = false;
+    return;
+}
+
+java.util.TimeZone srcTz = zoneFor(input_row.timezone_code);
+java.util.Calendar local = java.util.Calendar.getInstance(srcTz);
+local.setTime(parsed);
+
+java.util.Calendar utc = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
+utc.setTime(parsed);
+
+int origDay = local.get(java.util.Calendar.DAY_OF_MONTH);
+java.util.Calendar next = (java.util.Calendar) local.clone();
+next.add(java.util.Calendar.MONTH, 1);
+int maxDayNextMonth = next.getActualMaximum(java.util.Calendar.DAY_OF_MONTH);
+next.set(java.util.Calendar.DAY_OF_MONTH, Math.min(origDay, maxDayNextMonth));
+
+boolean leapAnniversary = local.get(java.util.Calendar.MONTH) == java.util.Calendar.FEBRUARY
+        && local.get(java.util.Calendar.DAY_OF_MONTH) == 29;
+
+output_row.sub_id = input_row.sub_id;
+output_row.valid = true;
+output_row.local_date = iso(local);
+output_row.utc_date = iso(utc);
+output_row.is_leap_year = isLeapYear(local.get(java.util.Calendar.YEAR));
+output_row.next_billing_date = iso(next);
+output_row.is_leap_anniversary = leapAnniversary;
+
+private static final String[] PATTERNS = {
+        "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "MM/dd/yy", "MM/dd/yyyy"};
+
+private java.util.TimeZone zoneFor(String code) {
+    if ("EST".equals(code)) return java.util.TimeZone.getTimeZone("America/New_York");
+    if ("PST".equals(code)) return java.util.TimeZone.getTimeZone("America/Los_Angeles");
+    if ("CET".equals(code)) return java.util.TimeZone.getTimeZone("Europe/Paris");
+    return java.util.TimeZone.getTimeZone("UTC");
+}
+
+private java.util.Date parseFlexible(String s, java.util.TimeZone tz) {
+    if (s == null || s.trim().isEmpty()) return null;
+    for (String p : PATTERNS) {
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat(p);
+        sdf.setLenient(false);
+        sdf.setTimeZone(tz);
+        try { return sdf.parse(s.trim()); } catch (java.text.ParseException ignored) { }
+    }
+    return null;
+}
+
+private boolean isLeapYear(int year) {
+    return (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0);
+}
+
+private String iso(java.util.Calendar c) {
+    return String.format("%04d-%02d-%02d",
+            c.get(java.util.Calendar.YEAR), c.get(java.util.Calendar.MONTH) + 1, c.get(java.util.Calendar.DAY_OF_MONTH));
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="sub_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="valid" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="local_date" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="utc_date" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="is_leap_year" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="next_billing_date" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="is_leap_anniversary" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="560" posY="80" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="subscription_billing_schedule"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

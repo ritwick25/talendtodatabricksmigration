@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Parent Orchestrator" jobId="job_06_parent_orchestrator" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Top of a tRunJob chain (parent -&gt; child -&gt; grandchild). Runs a tPrejob marker, stamps a batchRunId into globalMap, calls job_07_child_validation propagating customer_batch_id via context, and wires ON_SUBJOB_OK/ON_SUBJOB_ERROR triggers to tPostjob / tDie.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tPrejob" componentVersion="0.102" posX="80" posY="40" uniqueName="tPrejob_1">
+      <elementParameter name="NOTE" field="TEXT" value="Synthetic prejob marker: in a real job this might check a lock file."/>
+    </node>
+    <node componentName="tJava" componentVersion="0.102" posX="80" posY="150" uniqueName="tJava_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJava_1 -- small setup block (not a COMPLEX block): stamps a batchRunId into globalMap so
+// downstream tRunJob children can read it back out via globalMap after context propagation.
+String batchRunId = (String)context.batch_run_prefix + "-" + com.sample.util.DateUtil.formatIsoInZone(new java.util.Date(), "UTC");
+globalMap.put("batchRunId", batchRunId);
+System.out.println("job_06_parent_orchestrator: starting run " + batchRunId);
+]]></elementParameter>
+    </node>
+    <node componentName="tRunJob" componentVersion="0.102" posX="320" posY="150" uniqueName="tRunJob_1">
+      <elementParameter name="JOB" field="TEXT" value="job_07_child_validation"/>
+      <elementParameter name="PROPAGATE_CONTEXT" field="TEXT" value="true"/>
+      <elementParameter name="CONTEXT_PARAM_customer_batch_id" field="TEXT" value="(String)context.customer_batch_id"/>
+      <elementParameter name="USE_DYNAMIC_PARAM" field="TEXT" value="false"/>
+    </node>
+    <node componentName="tPostjob" componentVersion="0.102" posX="560" posY="40" uniqueName="tPostjob_1">
+      <elementParameter name="NOTE" field="TEXT" value="Synthetic postjob marker: cleanup / notification point."/>
+    </node>
+    <node componentName="tDie" componentVersion="0.102" posX="560" posY="260" uniqueName="tDie_1">
+      <elementParameter name="MESSAGE" field="TEXT" value="&quot;job_06_parent_orchestrator: child job failed for batch &quot; + (String)context.customer_batch_id"/>
+      <elementParameter name="ERROR_CODE" field="TEXT" value="2"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tPrejob_1" target="tJava_1" connectorName="ON_SUBJOB_OK"/>
+    <connection source="tJava_1" target="tRunJob_1" connectorName="ON_COMPONENT_OK"/>
+    <connection source="tRunJob_1" target="tPostjob_1" connectorName="ON_SUBJOB_OK"/>
+    <connection source="tRunJob_1" target="tDie_1" connectorName="ON_SUBJOB_ERROR"/>
+  </connections>
+</talendJob>

@@ -1,0 +1,98 @@
+{
+  "job_id": "job_18_stateful_batch_counter",
+  "block_id": "tJavaFlex_1",
+  "pattern_tags": [
+    "STATEFUL"
+  ],
+  "source": "DERIVED",
+  "derivation_note": "DERIVED: this is precisely the 'tJavaFlex start/main/end shared state' coupling the brief names explicitly -- a static AtomicLong, a static dedupe Set, and a static session-count Map shared across START/MAIN/END. Reasoned through row-by-row in fixtures/clickstream_events.csv order: S1/EVT1 (PAGE_VIEW), S1/EVT1 again (exact duplicate), S1/EVT2 (CLICK), S2/EVT3 (PAGE_VIEW).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "first row, new event",
+      "input": {
+        "session_id": "S1",
+        "event_id": "EVT1",
+        "event_type": "PAGE_VIEW"
+      },
+      "expected_output": {
+        "session_id": "S1",
+        "event_id": "EVT1",
+        "event_type": "PAGE_VIEW",
+        "is_duplicate": false,
+        "session_event_seq": 1,
+        "running_total_events": 1,
+        "_note": "seenEventIds.add('EVT1') returns true (new) -> is_duplicate=false"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "edge case: exact duplicate event_id immediately after",
+      "input": {
+        "session_id": "S1",
+        "event_id": "EVT1",
+        "event_type": "PAGE_VIEW"
+      },
+      "expected_output": {
+        "session_id": "S1",
+        "event_id": "EVT1",
+        "event_type": "PAGE_VIEW",
+        "is_duplicate": true,
+        "session_event_seq": 2,
+        "running_total_events": 2,
+        "_note": "seenEventIds.add('EVT1') returns false (already present) -> is_duplicate=true; totalEvents still increments and session_event_seq still advances regardless of duplicate status"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "different event, same session",
+      "input": {
+        "session_id": "S1",
+        "event_id": "EVT2",
+        "event_type": "CLICK"
+      },
+      "expected_output": {
+        "session_id": "S1",
+        "event_id": "EVT2",
+        "event_type": "CLICK",
+        "is_duplicate": false,
+        "session_event_seq": 3,
+        "running_total_events": 3
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "new session",
+      "input": {
+        "session_id": "S2",
+        "event_id": "EVT3",
+        "event_type": "PAGE_VIEW"
+      },
+      "expected_output": {
+        "session_id": "S2",
+        "event_id": "EVT3",
+        "event_type": "PAGE_VIEW",
+        "is_duplicate": false,
+        "session_event_seq": 1,
+        "running_total_events": 4,
+        "_note": "sessionEventCounts is keyed per session_id, so S2 starts its own seq at 1 even though running_total_events (global) is 4"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "end-of-run tally (END_CODE)",
+      "input": {
+        "_phase": "END"
+      },
+      "expected_output": {
+        "totalEvents": 4,
+        "distinctEventIds": 3,
+        "sessions": 2,
+        "busiestSession": "S1",
+        "busiestSessionCount": 3,
+        "duplicateCount": 1,
+        "_note": "globalMap.put('job18_totalEvents', 4); distinct ids = {EVT1,EVT2,EVT3}; sessions = {S1:3 events, S2:1 event} so busiestSession='S1' with 3; duplicateCount = totalEvents(4) - distinctEventIds(3) = 1"
+      }
+    }
+  ]
+}

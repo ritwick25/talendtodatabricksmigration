@@ -1,0 +1,150 @@
+{
+  "job_id": "job_15_checksum_reconciliation",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "NUMERIC",
+    "EXTERNAL_LIB"
+  ],
+  "source": "JAVA_EXECUTED",
+  "harness_note": "Executed via a standalone Java harness (javac/java, OpenJDK 27) that transliterates the block's core transformation logic with input_row/output_row replaced by plain method parameters/return values. No globalMap/context/cross-row static state is involved, so the transliteration is behavior-preserving. Source files: samples/talend_export_src jars_src (for the external-lib calls) + an ad hoc Harness*.java driver (not checked into this repo).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "large debit, valid Luhn, matches control",
+      "input": {
+        "entry_id": "E1001",
+        "account_id": "4111111111111111",
+        "debit": "15000.00",
+        "credit": "0.00",
+        "control_total": "15000.00"
+      },
+      "expected_output": {
+        "net_amount": 15000.0,
+        "flags_bitmask": 5,
+        "flag_debit": true,
+        "flag_credit": false,
+        "flag_large": true,
+        "flag_mismatch": false,
+        "account_luhn_valid": true,
+        "entry_crc32": "B4556CB9",
+        "net_cents": 1500000,
+        "cents_int_overflow_safe": true
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "credit-only entry, matches negative control",
+      "input": {
+        "entry_id": "E1002",
+        "account_id": "1234567812345670",
+        "debit": "0.00",
+        "credit": "250.50",
+        "control_total": "-250.50"
+      },
+      "expected_output": {
+        "net_amount": -250.5,
+        "flags_bitmask": 2,
+        "flag_debit": false,
+        "flag_credit": true,
+        "flag_large": false,
+        "flag_mismatch": false,
+        "account_luhn_valid": true,
+        "entry_crc32": "2D5C3D03",
+        "net_cents": -25050,
+        "cents_int_overflow_safe": true
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: net zero vs non-zero control -> mismatch",
+      "input": {
+        "entry_id": "E1003",
+        "account_id": "9999999999999999",
+        "debit": "500.00",
+        "credit": "500.00",
+        "control_total": "1.00"
+      },
+      "expected_output": {
+        "net_amount": 0.0,
+        "flags_bitmask": 11,
+        "flag_debit": true,
+        "flag_credit": true,
+        "flag_large": false,
+        "flag_mismatch": true,
+        "account_luhn_valid": false,
+        "entry_crc32": "5A5B0D95",
+        "net_cents": 0,
+        "cents_int_overflow_safe": true
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "edge case: zero/zero, tampered (invalid) Luhn account id",
+      "input": {
+        "entry_id": "E1004",
+        "account_id": "4111111111111112",
+        "debit": "0.00",
+        "credit": "0.00",
+        "control_total": "0.00"
+      },
+      "expected_output": {
+        "net_amount": 0.0,
+        "flags_bitmask": 0,
+        "flag_debit": false,
+        "flag_credit": false,
+        "flag_large": false,
+        "flag_mismatch": false,
+        "account_luhn_valid": false,
+        "entry_crc32": "C43F9836",
+        "net_cents": 0,
+        "cents_int_overflow_safe": true
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "very large debit, valid Luhn",
+      "input": {
+        "entry_id": "E1005",
+        "account_id": "4012888888881881",
+        "debit": "99999.99",
+        "credit": "0.00",
+        "control_total": "99999.99"
+      },
+      "expected_output": {
+        "net_amount": 99999.99,
+        "flags_bitmask": 5,
+        "flag_debit": true,
+        "flag_credit": false,
+        "flag_large": true,
+        "flag_mismatch": false,
+        "account_luhn_valid": true,
+        "entry_crc32": "B338A8A0",
+        "net_cents": 9999999,
+        "cents_int_overflow_safe": true
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "edge case: HALF_UP rounding at the half-cent boundary",
+      "input": {
+        "entry_id": "E1006",
+        "account_id": "0000000000000000",
+        "debit": "0.005",
+        "credit": "0.00",
+        "control_total": "0.01"
+      },
+      "expected_output": {
+        "net_amount": 0.01,
+        "flags_bitmask": 1,
+        "flag_debit": true,
+        "flag_credit": false,
+        "flag_large": false,
+        "flag_mismatch": false,
+        "account_luhn_valid": true,
+        "entry_crc32": "2A31F91A",
+        "net_cents": 1,
+        "cents_int_overflow_safe": true
+      }
+    }
+  ]
+}

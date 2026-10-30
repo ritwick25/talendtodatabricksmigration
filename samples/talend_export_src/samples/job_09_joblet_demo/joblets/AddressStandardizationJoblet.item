@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJoblet name="AddressStandardizationJoblet" synthetic="true">
+  <description>Standardizes a raw address row (trim/titlecase/upper-case).</description>
+  <nodes>
+    <node componentName="tJobletInput" componentVersion="0.102" posX="80" posY="80" uniqueName="tJobletInput_1">
+      <metadata connector="FLOW">
+        <column name="address_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="street" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="city" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="state" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="zip" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="country" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 (inside the AddressStandardizationJoblet) -- small, not COMPLEX. Normalizes
+// whitespace/case on address fields using the shared external lib.
+output_row.address_id = input_row.address_id;
+output_row.street_clean = com.sample.util.StringUtils.titleCase(com.sample.util.StringUtils.normalizeWhitespace(input_row.street));
+output_row.city_clean = com.sample.util.StringUtils.titleCase(com.sample.util.StringUtils.normalizeWhitespace(input_row.city == null ? "" : input_row.city));
+output_row.state_clean = input_row.state == null ? "" : input_row.state.trim().toUpperCase(java.util.Locale.ROOT);
+output_row.country_clean = input_row.country == null ? "" : input_row.country.trim().toUpperCase(java.util.Locale.ROOT);
+output_row.zip = input_row.zip;
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="address_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="street_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="city_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="state_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="zip" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="country_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJobletOutput" componentVersion="0.102" posX="560" posY="80" uniqueName="tJobletOutput_1">
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tJobletInput_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tJobletOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJoblet>

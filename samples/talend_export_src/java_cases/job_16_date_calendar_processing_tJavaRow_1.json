@@ -1,0 +1,102 @@
+{
+  "job_id": "job_16_date_calendar_processing",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "DATE/TIME"
+  ],
+  "source": "JAVA_EXECUTED",
+  "harness_note": "Executed via a standalone Java harness (javac/java, OpenJDK 27) that transliterates the block's core transformation logic with input_row/output_row replaced by plain method parameters/return values. No globalMap/context/cross-row static state is involved, so the transliteration is behavior-preserving. Source files: samples/talend_export_src jars_src (for the external-lib calls) + an ad hoc Harness*.java driver (not checked into this repo).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "leap day with ISO 'T' separator",
+      "input": {
+        "event_ts_raw": "2024-02-29T10:15:00",
+        "timezone_code": "EST"
+      },
+      "expected_output": {
+        "valid": true,
+        "local_date": "2024-02-29",
+        "is_leap_year": true,
+        "utc_date": "2024-02-29",
+        "next_billing_date": "2024-03-29",
+        "is_leap_anniversary": true
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "month-end clamp into leap Feb",
+      "input": {
+        "event_ts_raw": "2024-01-31T00:00:00",
+        "timezone_code": "UTC"
+      },
+      "expected_output": {
+        "valid": true,
+        "local_date": "2024-01-31",
+        "is_leap_year": true,
+        "utc_date": "2024-01-31",
+        "next_billing_date": "2024-02-29",
+        "is_leap_anniversary": false
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "month-end clamp into non-leap Feb",
+      "input": {
+        "event_ts_raw": "2023-01-31 12:00:00",
+        "timezone_code": "PST"
+      },
+      "expected_output": {
+        "valid": true,
+        "local_date": "2023-01-31",
+        "is_leap_year": false,
+        "utc_date": "2023-01-31",
+        "next_billing_date": "2023-02-28",
+        "is_leap_anniversary": false
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "2-digit-year pattern",
+      "input": {
+        "event_ts_raw": "06/15/24",
+        "timezone_code": "CET"
+      },
+      "expected_output": {
+        "valid": true,
+        "local_date": "2024-06-15",
+        "is_leap_year": true,
+        "utc_date": "2024-06-14",
+        "next_billing_date": "2024-07-15",
+        "is_leap_anniversary": false
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "edge case: unparseable",
+      "input": {
+        "event_ts_raw": "not-a-timestamp",
+        "timezone_code": "UTC"
+      },
+      "expected_output": {
+        "valid": false
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "31-day month to 30-day month clamp",
+      "input": {
+        "event_ts_raw": "2024-03-31",
+        "timezone_code": "EST"
+      },
+      "expected_output": {
+        "valid": true,
+        "local_date": "2024-03-31",
+        "is_leap_year": true,
+        "utc_date": "2024-03-31",
+        "next_billing_date": "2024-04-30",
+        "is_leap_anniversary": false
+      }
+    }
+  ]
+}

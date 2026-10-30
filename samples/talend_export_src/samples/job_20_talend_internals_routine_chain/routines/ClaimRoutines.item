@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routine name="ClaimRoutines" synthetic="true">
+  <code><![CDATA[
+package routines;
+
+/**
+ * Synthetic Talend custom routine for job_20_talend_internals_routine_chain. Demonstrates
+ * routine-calling-routine (validateClaim calls formatClaimCode) and uses the shared
+ * com.sample.util.StringUtils external lib.
+ */
+public class ClaimRoutines {
+
+    /**
+     * Validates a claim amount against a threshold and returns a formatted claim code via
+     * formatClaimCode() (routine calling routine). Returns null if the claim is within bounds
+     * and no code is needed.
+     */
+    public static String validateClaim(String claimId, double amount, double maxClaimAmount) {
+        if (amount < 0) {
+            return formatClaimCode(claimId, "NEGATIVE");
+        }
+        if (amount > maxClaimAmount * 10) {
+            return formatClaimCode(claimId, "FATAL_OVER_LIMIT");
+        }
+        if (amount > maxClaimAmount) {
+            return formatClaimCode(claimId, "REVIEW");
+        }
+        return null;
+    }
+
+    /** Formats a claim code using the shared StringUtils helper (title-cases the reason). */
+    public static String formatClaimCode(String claimId, String reason) {
+        return claimId + ":" + com.sample.util.StringUtils.titleCase(reason.replace('_', ' '));
+    }
+}
+
+]]></code>
+</routine>

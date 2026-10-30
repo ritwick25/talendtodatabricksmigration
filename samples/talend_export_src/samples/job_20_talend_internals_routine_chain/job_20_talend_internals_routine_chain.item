@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Claims Validation (Routine Chain)" jobId="job_20_talend_internals_routine_chain" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Validates insurance claims with a TALEND INTERNALS Java block: globalMap batchRunId propagation, a context.max_claim_amount threshold, routine-calling-routine via routines.ClaimRoutines (validateClaim -&gt; formatClaimCode), a RUN_IF-gated tDie for fatal claims, and a tWarn on ON_COMPONENT_ERROR for soft validation failures.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tJava" componentVersion="0.102" posX="80" posY="40" uniqueName="tJava_0">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJava_0 -- small setup block (not COMPLEX): stamps a batchRunId into globalMap before the
+// main flow starts, exactly as job_06_parent_orchestrator does for its tRunJob children.
+String batchRunId = (String)context.batch_run_prefix + "-claims-" + System.currentTimeMillis();
+globalMap.put("batchRunId", batchRunId);
+globalMap.put("job20_fatalFlag", false);
+]]></elementParameter>
+    </node>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="180" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/claims_batch.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="claim_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="policy_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="claim_amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="claim_status" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="180" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- Pattern: TALEND INTERNALS (globalMap read/write, context.max_claim_amount,
+// input_row/output_row, routine-calling-routine via routines.ClaimRoutines, a fatal condition
+// flagged for a downstream RUN_IF/tDie, and a soft-validation failure routed to tWarn via
+// ON_COMPONENT_ERROR). DERIVED: inherently depends on globalMap/context/routine state.
+
+Double maxClaimAmount = ((Integer) context.max_claim_amount).doubleValue();
+String claimCode = routines.ClaimRoutines.validateClaim(
+        input_row.claim_id, input_row.claim_amount == null ? 0.0 : input_row.claim_amount.doubleValue(), maxClaimAmount);
+
+if (claimCode != null && claimCode.contains("FATAL")) {
+    globalMap.put("job20_fatalFlag", true);
+    System.err.println("tJavaRow_1: FATAL claim " + input_row.claim_id + " code=" + claimCode
+            + " batch=" + globalMap.get("batchRunId"));
+    throw new RuntimeException("fatal claim validation failure: " + claimCode);
+}
+
+if (claimCode != null) {
+    System.out.println(auditLine(input_row.claim_id, input_row.policy_id, claimCode,
+            (String) globalMap.get("batchRunId")));
+}
+
+output_row.claim_id = input_row.claim_id;
+output_row.policy_id = input_row.policy_id;
+output_row.claim_amount = input_row.claim_amount;
+output_row.claim_code = claimCode == null ? "" : claimCode;
+output_row.batch_run_id = (String) globalMap.get("batchRunId");
+
+/** Consistent audit-log line for any claim that got a non-null validation code. */
+private String auditLine(String claimId, String policyId, String code, String batchRunId) {
+    return String.format("[claims-validation batch=%s] claim=%s policy=%s code=%s",
+            batchRunId, claimId, policyId, code);
+}
+
+/**
+ * Convenience check mirroring routines.ClaimRoutines' own threshold logic, used only to decide
+ * whether to escalate the log level above -- kept independent of the routine so a future change
+ * to the routine's thresholds is visible here as a potential drift to reconcile.
+ */
+private boolean isAboveReviewThreshold(double amount, double maxClaimAmount) {
+    return amount > maxClaimAmount;
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="claim_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="policy_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="claim_amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="claim_code" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="batch_run_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tWarn" componentVersion="0.102" posX="320" posY="340" uniqueName="tWarn_1">
+      <elementParameter name="MESSAGE" field="TEXT" value="&quot;tJavaRow_1 soft-failed a claim validation, batch=&quot; + globalMap.get(&quot;batchRunId&quot;)"/>
+    </node>
+    <node componentName="tDie" componentVersion="0.102" posX="560" posY="340" uniqueName="tDie_1">
+      <elementParameter name="MESSAGE" field="TEXT" value="&quot;job_20_talend_internals_routine_chain: fatal claim detected in batch &quot; + globalMap.get(&quot;batchRunId&quot;)"/>
+      <elementParameter name="ERROR_CODE" field="TEXT" value="4"/>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="560" posY="180" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="claims_validated"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tJava_0" target="tFileInputDelimited_1" connectorName="ON_SUBJOB_OK"/>
+    <connection source="tFileInputDelimited_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tWarn_1" connectorName="ON_COMPONENT_ERROR"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tDie_1" connectorName="RUN_IF" condition="((Boolean)globalMap.get(&quot;job20_fatalFlag&quot;)) == true"/>
+  </connections>
+</talendJob>

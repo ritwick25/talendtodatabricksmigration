@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Child Validation" jobId="job_07_child_validation" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Middle link of the tRunJob chain: validates rows (TALEND INTERNALS Java using globalMap, context, Numeric.sequence), filters invalid rows to reject, and on success calls job_08_grandchild_archive (the grandchild) with the batch id propagated via context.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/validation_input.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="row_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="customer_batch_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="status" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- row validation. Pattern: TALEND INTERNALS (globalMap read/write, context.*,
+// input_row/output_row, Numeric.sequence built-in routine, warn routed via System.err to mimic
+// a Talend tWarn call from Java). DERIVED: depends on globalMap/context, not runnable standalone.
+
+if (validRowCount == null) { validRowCount = 0; }
+if (invalidRowCount == null) { invalidRowCount = 0; }
+
+int seq = Numeric.sequence("job07ValidationSeq", 1, 1);
+Integer maxRetries = (Integer)context.max_retries;
+
+boolean ok = input_row.amount != null && input_row.amount.doubleValue() > 0;
+if (!ok) {
+    invalidRowCount++;
+    globalMap.put("job07_invalidRowCount", invalidRowCount);
+    System.err.println("tWarn: row " + input_row.row_id + " failed validation (amount=" + input_row.amount
+            + "), batch=" + globalMap.get("batchRunId") + ", maxRetries=" + maxRetries);
+    output_row.row_id = input_row.row_id;
+    output_row.validation_seq = seq;
+    output_row.is_valid = false;
+    return;
+}
+
+validRowCount++;
+globalMap.put("job07_validRowCount", validRowCount);
+
+output_row.row_id = input_row.row_id;
+output_row.validation_seq = seq;
+output_row.is_valid = true;
+output_row.customer_batch_id = (String)context.customer_batch_id;
+
+if (!isWithinRetryBudget(invalidRowCount, maxRetries)) {
+    System.err.println("tJavaRow_1: invalidRowCount (" + invalidRowCount + ") has exceeded "
+            + "context.max_retries (" + maxRetries + ") for batch " + globalMap.get("batchRunId")
+            + " -- a real job would likely RUN_IF into a tDie here.");
+}
+
+/**
+ * Pure budget check: are we still within the configured retry/error allowance? Logged above,
+ * not currently wired to a hard stop in this job (job_11_error_handling demonstrates that
+ * harder-stop RUN_IF/tDie pattern instead, to avoid duplicating the same control-flow shape).
+ */
+private boolean isWithinRetryBudget(int invalidSoFar, Integer maxRetries) {
+    if (maxRetries == null) {
+        return true;
+    }
+    return invalidSoFar <= maxRetries;
+}
+
+/** Small formatting helper kept local to this block for consistent log lines. */
+private String describeBatch(String batchId, int valid, int invalid) {
+    return String.format("batch=%s valid=%d invalid=%d", batchId, valid, invalid);
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="row_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="validation_seq" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="is_valid" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="customer_batch_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFilterRow" componentVersion="0.102" posX="560" posY="80" uniqueName="tFilterRow_1">
+      <elementParameter name="FILTER_EXPRESSION" field="TEXT" value="is_valid"/>
+    </node>
+    <node componentName="tRunJob" componentVersion="0.102" posX="800" posY="40" uniqueName="tRunJob_2">
+      <elementParameter name="JOB" field="TEXT" value="job_08_grandchild_archive"/>
+      <elementParameter name="PROPAGATE_CONTEXT" field="TEXT" value="true"/>
+      <elementParameter name="CONTEXT_PARAM_customer_batch_id" field="TEXT" value="(String)context.customer_batch_id"/>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="560" posY="220" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/validation_rejects.csv&quot;"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tFilterRow_1" connectorName="FLOW"/>
+    <connection source="tFilterRow_1" target="tRunJob_2" connectorName="ON_COMPONENT_OK" label="valid_rows"/>
+    <connection source="tFilterRow_1" target="tFileOutputDelimited_1" connectorName="REJECT" label="invalid_rows"/>
+  </connections>
+</talendJob>

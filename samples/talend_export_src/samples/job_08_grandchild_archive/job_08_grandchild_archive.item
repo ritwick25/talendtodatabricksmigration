@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Grandchild Archive" jobId="job_08_grandchild_archive" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>End of the tRunJob chain (parent job_06 -&gt; child job_07 -&gt; this grandchild). Intentionally simple: stamps the propagated batch id and archives seed rows to a batch-named output file.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tJava" componentVersion="0.102" posX="80" posY="80" uniqueName="tJava_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJava_1 -- small archive-stamping block (not COMPLEX; this job is intentionally simple to
+// show the end of a tRunJob chain doesn't need to be heavy). Reads the batch id propagated
+// all the way from job_06 via context, and the validation count published by job_07 via globalMap.
+String batchId = (String)context.customer_batch_id;
+Object validCount = globalMap.get("job07_validRowCount");
+System.out.println("job_08_grandchild_archive: archiving batch=" + batchId + " validatedRows=" + validCount);
+]]></elementParameter>
+    </node>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="220" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/archive_seed.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="archive_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="payload" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="created_at" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="320" posY="220" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/archive_&quot; + (String)context.customer_batch_id + &quot;.csv&quot;"/>
+      <elementParameter name="APPEND" field="TEXT" value="true"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tJava_1" target="tFileInputDelimited_1" connectorName="ON_COMPONENT_OK"/>
+    <connection source="tFileInputDelimited_1" target="tFileOutputDelimited_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

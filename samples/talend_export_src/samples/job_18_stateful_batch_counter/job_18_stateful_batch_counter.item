@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Clickstream Dedupe &amp; Running Totals" jobId="job_18_stateful_batch_counter" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Processes a clickstream feed through a tJavaFlex block with STATEFUL start/main/end shared state: a running event counter, a dedupe set keyed on event_id, and per-session sequence counts, before filtering duplicates to reject and inserting the rest into clickstream_clean.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/clickstream_events.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="session_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="event_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="event_type" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="event_ts" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="user_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaFlex" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaFlex_1">
+      <elementParameter name="START_CODE" field="CODE"><![CDATA[
+// tJavaFlex_1 START -- runs once before the first row. Pattern: STATEFUL. DERIVED: this is
+// exactly the "tJavaFlex start/main/end shared state" coupling the brief calls out explicitly.
+totalEvents = new java.util.concurrent.atomic.AtomicLong(0L);
+seenEventIds = new java.util.HashSet<String>();
+sessionEventCounts = new java.util.HashMap<String, Integer>();
+]]></elementParameter>
+      <elementParameter name="MAIN_CODE" field="CODE"><![CDATA[
+// tJavaFlex_1 MAIN -- runs once per input row.
+totalEvents.incrementAndGet();
+boolean isDuplicate = !seenEventIds.add(input_row.event_id);
+
+Integer count = sessionEventCounts.get(input_row.session_id);
+int newCount = (count == null ? 0 : count) + 1;
+sessionEventCounts.put(input_row.session_id, newCount);
+
+output_row.session_id = input_row.session_id;
+output_row.event_id = input_row.event_id;
+output_row.event_type = input_row.event_type;
+output_row.is_duplicate = isDuplicate;
+output_row.session_event_seq = newCount;
+output_row.running_total_events = totalEvents.get();
+]]></elementParameter>
+      <elementParameter name="END_CODE" field="CODE"><![CDATA[
+// tJavaFlex_1 END -- runs once after the last row; logs the final tallies and the busiest session.
+int maxSessionEvents = 0;
+String busiestSession = null;
+for (java.util.Map.Entry<String, Integer> e : sessionEventCounts.entrySet()) {
+    if (e.getValue() > maxSessionEvents) {
+        maxSessionEvents = e.getValue();
+        busiestSession = e.getKey();
+    }
+}
+
+long duplicateCount = totalEvents.get() - seenEventIds.size();
+
+System.out.println(summarize(totalEvents.get(), seenEventIds.size(), sessionEventCounts.size(),
+        busiestSession, maxSessionEvents, duplicateCount));
+
+globalMap.put("job18_totalEvents", totalEvents.get());
+globalMap.put("job18_duplicateCount", duplicateCount);
+globalMap.put("job18_busiestSession", busiestSession);
+
+/** Single formatting point for the end-of-run summary line, kept local to this component. */
+private String summarize(long total, int distinct, int sessions, String busiest, int busiestCount, long dupes) {
+    return String.format(
+            "job_18_stateful_batch_counter: totalEvents=%d distinctEventIds=%d sessions=%d "
+            + "busiestSession=%s(%d events) duplicates=%d",
+            total, distinct, sessions, busiest, busiestCount, dupes);
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="session_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="event_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="event_type" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="is_duplicate" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="session_event_seq" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="running_total_events" type="id_Long" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFilterRow" componentVersion="0.102" posX="560" posY="80" uniqueName="tFilterRow_1">
+      <elementParameter name="FILTER_EXPRESSION" field="TEXT" value="!is_duplicate"/>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="800" posY="40" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="clickstream_clean"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="800" posY="180" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/clickstream_dedupe_rejects.csv&quot;"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tJavaFlex_1" connectorName="FLOW"/>
+    <connection source="tJavaFlex_1" target="tFilterRow_1" connectorName="FLOW"/>
+    <connection source="tFilterRow_1" target="tDBOutput_1" connectorName="FLOW" label="unique"/>
+    <connection source="tFilterRow_1" target="tFileOutputDelimited_1" connectorName="REJECT" label="duplicates"/>
+  </connections>
+</talendJob>

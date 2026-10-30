@@ -1,0 +1,7 @@
+customer_id,first_name,last_name,email,signup_date,country_code,loyalty_points
+1001,jane,doe,jane.doe@example.com,2022-03-14,US,1250
+1002,marco,rossi,marco.rossi@example.it,2021-11-02,IT,480
+1003,li,wei,li.wei@example.cn,2023-07-19,CN,75
+1004,,garcia,bad-email-missing-first-name,2020-01-05,MX,0
+1005,amara,okafor,amara.okafor@example.ng,2019-05-30,NG,999
+1006,erik,larsson,erik.larsson@example.se,2024-02-29,SE,1500

@@ -1,0 +1,43 @@
+[
+  {
+    "event_id": "EVT1",
+    "order_id": "ORD1001",
+    "event_type": "CREATED",
+    "amount": 159.47,
+    "currency": "USD",
+    "items": [
+      {
+        "name": "Widget",
+        "qty": 3,
+        "unit_price": "19.99"
+      },
+      {
+        "name": "Gadget",
+        "qty": 1,
+        "unit_price": "99.50"
+      }
+    ]
+  },
+  {
+    "event_id": "EVT2",
+    "order_id": "ORD1002",
+    "event_type": "CREATED",
+    "amount": 10.0,
+    "currency": "EUR",
+    "items": [
+      {
+        "name": "Bolt",
+        "qty": 1000,
+        "unit_price": "0.01"
+      }
+    ]
+  },
+  {
+    "event_id": "EVT3",
+    "order_id": "ORD1003",
+    "event_type": "CANCELLED",
+    "amount": 0.0,
+    "currency": "USD",
+    "items": []
+  }
+]

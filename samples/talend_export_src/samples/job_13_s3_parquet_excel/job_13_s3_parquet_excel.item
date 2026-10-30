@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Roster/Returns Excel+Parquet Reconciliation" jobId="job_13_s3_parquet_excel" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Reads an Excel employee roster (tFileInputExcel) and reconciles each row through a SIDE-EFFECTS Java block (temp-dir file round-trip + checksum); separately reads a returns feed and writes it toward an S3a-style Parquet path (tFileOutputParquet, config text only).</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputExcel" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputExcel_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/employee_roster.xlsx&quot;"/>
+      <elementParameter name="SHEET" field="TEXT" value="Roster"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="emp_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="name" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="dept" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="hire_date" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="salary" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- Pattern: SIDE EFFECTS (temp-dir file I/O: writes a per-row reconciliation
+// line to a temp file, reads it back, hashes it). DERIVED: depends on input_row and the
+// filesystem, not a pure function of its arguments alone.
+
+java.io.File tmpDir = new java.io.File(System.getProperty("java.io.tmpdir"), "job13_recon");
+tmpDir.mkdirs();
+java.io.File tmpFile = new java.io.File(tmpDir, input_row.emp_id + ".txt");
+
+String line = input_row.emp_id + "|" + input_row.dept + "|" + input_row.salary;
+try (java.io.FileWriter fw = new java.io.FileWriter(tmpFile)) {
+    fw.write(line);
+} catch (java.io.IOException e) {
+    System.err.println("tJavaRow_1: failed writing recon file for " + input_row.emp_id + ": " + e.getMessage());
+}
+
+String readBack = readWholeFile(tmpFile);
+String checksum = com.sample.util.ChecksumUtil.crc32Hex(readBack == null ? "" : readBack);
+tmpFile.delete();
+
+if (!looksLikeValidEmpId(input_row.emp_id)) {
+    System.err.println("tJavaRow_1: emp_id '" + input_row.emp_id + "' does not match the "
+            + "expected E### shape -- proceeding anyway since this is a reconciliation step, "
+            + "not a validation gate.");
+}
+
+output_row.emp_id = input_row.emp_id;
+output_row.dept = input_row.dept;
+output_row.salary = input_row.salary;
+output_row.recon_checksum = checksum;
+output_row.recon_round_trip_ok = line.equals(readBack);
+
+/** Reads a small text file fully into a String; returns null on any IO error. */
+private String readWholeFile(java.io.File f) {
+    try {
+        byte[] bytes = java.nio.file.Files.readAllBytes(f.toPath());
+        return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+    } catch (java.io.IOException e) {
+        return null;
+    }
+}
+
+/** Shape check only (E followed by digits); not a business rule, just a logging aid. */
+private boolean looksLikeValidEmpId(String empId) {
+    return empId != null && empId.matches("E\\d+");
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="emp_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="dept" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="salary" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="recon_checksum" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="recon_round_trip_ok" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="560" posY="80" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/employee_roster_reconciled.csv&quot;"/>
+    </node>
+    <node componentName="tFileInputJSON" componentVersion="0.102" posX="80" posY="260" uniqueName="tFileInputJSON_2">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/returns_sample.json&quot;"/>
+      <elementParameter name="NOTE" field="TEXT" value="Stands in for a tFileInputParquet source; see coverage_notes for the approximation."/>
+      <metadata connector="FLOW">
+        <column name="return_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="order_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="reason" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="returned_at" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileOutputParquet" componentVersion="0.102" posX="320" posY="260" uniqueName="tFileOutputParquet_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.s3_bucket + &quot;bronze/returns/part-00000.parquet&quot;"/>
+      <elementParameter name="NOTE" field="TEXT" value="Config text only -- no real S3/Parquet write is performed by this synthetic export."/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputExcel_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tFileOutputDelimited_1" connectorName="FLOW"/>
+    <connection source="tFileInputJSON_2" target="tFileOutputParquet_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

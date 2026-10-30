@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Product Catalog Normalization" jobId="job_03_product_normalization" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Unites two supplier product feeds (tUnite), replicates the merged flow (tReplicate) into a normalize branch (tNormalize splits pipe-delimited tags into one row each, feeding a STRING-HEAVY Java block) and a denormalize branch (tDenormalize regroups tags back together).</description>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/products_supplier_a.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="product_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="name" type="id_String" length="120" precision="" nullable="true" key="false"/>
+        <column name="tags" type="id_String" length="200" precision="" nullable="true" key="false"/>
+        <column name="categories" type="id_String" length="60" precision="" nullable="true" key="false"/>
+        <column name="price" type="id_BigDecimal" length="10" precision="2" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="220" uniqueName="tFileInputDelimited_2">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/products_supplier_b.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="product_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="name" type="id_String" length="120" precision="" nullable="true" key="false"/>
+        <column name="tags" type="id_String" length="200" precision="" nullable="true" key="false"/>
+        <column name="categories" type="id_String" length="60" precision="" nullable="true" key="false"/>
+        <column name="price" type="id_BigDecimal" length="10" precision="2" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tUnite" componentVersion="0.102" posX="320" posY="150" uniqueName="tUnite_1">
+      <elementParameter name="UNION_ALL" field="TEXT" value="true"/>
+    </node>
+    <node componentName="tReplicate" componentVersion="0.102" posX="560" posY="150" uniqueName="tReplicate_1">
+    </node>
+    <node componentName="tNormalize" componentVersion="0.102" posX="800" posY="80" uniqueName="tNormalize_1">
+      <elementParameter name="NORMALIZE_COLUMN" field="TEXT" value="tags"/>
+      <elementParameter name="NORMALIZE_DELIMITER" field="TEXT" value="|"/>
+      <elementParameter name="KEEP_ORIGINAL_AS" field="TEXT" value="tags_original"/>
+      <metadata connector="FLOW">
+        <column name="product_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="name" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="sku_raw" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="tag" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="tags_original" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="1040" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- runs after tNormalize_1 (one row per tag). Pattern: STRING-HEAVY.
+// Builds a URL-safe slug (Unicode-aware accent stripping), extracts a SKU year/seq/rev via a
+// named-group regex, and demonstrates the split()-trailing-empty edge case on the raw tags cell
+// that fed tNormalize_1. Also uses com.sample.util.StringUtils (EXTERNAL_LIB).
+
+String name = input_row.name;
+String skuRaw = input_row.sku_raw == null ? "" : input_row.sku_raw;
+String tagsCsv = input_row.tags_original == null ? "" : input_row.tags_original;
+
+output_row.product_id = input_row.product_id;
+output_row.tag = input_row.tag;
+output_row.slug = slugify(name);
+output_row.display_label = String.format("%s (%s)",
+        com.sample.util.StringUtils.titleCase(com.sample.util.StringUtils.normalizeWhitespace(name)), skuRaw);
+
+java.util.regex.Matcher m = SKU_PATTERN.matcher(skuRaw);
+if (m.find()) {
+    output_row.sku_year = m.group("year");
+    output_row.sku_seq = m.group("seq");
+    output_row.sku_rev = m.group("rev");
+} else {
+    output_row.sku_year = ""; output_row.sku_seq = ""; output_row.sku_rev = "";
+}
+
+// split() trailing-empty edge case: default split() silently drops trailing empty strings,
+// split(sep, -1) preserves them -- this routinely bites naive CSV re-splitting logic.
+String[] trimming = tagsCsv.split("\\|");
+String[] preserving = tagsCsv.split("\\|", -1);
+output_row.tags_trimming_count = trimming.length;
+output_row.tags_preserving_count = preserving.length;
+
+private static final java.util.regex.Pattern SKU_PATTERN =
+        java.util.regex.Pattern.compile("SKU-(?<year>\\d{4})-(?<seq>\\d{5})-(?<rev>[A-Z])");
+
+/** Unicode-aware slugify: NFD-decomposes to strip combining diacriticals, then lower-cases. */
+private String slugify(String name) {
+    String normalizedWs = com.sample.util.StringUtils.normalizeWhitespace(name);
+    String decomposed = java.text.Normalizer.normalize(normalizedWs, java.text.Normalizer.Form.NFD);
+    String ascii = decomposed.replaceAll("[\\p{InCombiningDiacriticalMarks}]", "").toLowerCase(java.util.Locale.ROOT);
+    StringBuilder sb = new StringBuilder();
+    boolean lastDash = false;
+    for (int i = 0; i < ascii.length(); i++) {
+        char c = ascii.charAt(i);
+        if (Character.isLetterOrDigit(c)) { sb.append(c); lastDash = false; }
+        else if (!lastDash) { sb.append('-'); lastDash = true; }
+    }
+    String slug = sb.toString();
+    while (slug.endsWith("-")) slug = slug.substring(0, slug.length() - 1);
+    while (slug.startsWith("-")) slug = slug.substring(1);
+    return slug;
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="product_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="tag" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="slug" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="display_label" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="sku_year" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="sku_seq" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="sku_rev" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="tags_trimming_count" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="tags_preserving_count" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="1280" posY="80" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/products_normalized.csv&quot;"/>
+    </node>
+    <node componentName="tDenormalize" componentVersion="0.102" posX="800" posY="260" uniqueName="tDenormalize_1">
+      <elementParameter name="DENORMALIZE_COLUMN" field="TEXT" value="tag"/>
+      <elementParameter name="DENORMALIZE_DELIMITER" field="TEXT" value="; "/>
+      <elementParameter name="GROUP_BY" field="TEXT" value="product_id"/>
+      <elementParameter name="_note" field="CODE"><![CDATA[
+// tDenormalize_1 config note (no custom Java here): groups rows back by product_id,
+// concatenating the normalized "tag" column with delimiter "; " to rebuild a display-friendly
+// tags string -- demonstrates the inverse of tNormalize_1 in the same job.
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="product_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="tags_combined" type="id_String" length="300" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="1040" posY="260" uniqueName="tFileOutputDelimited_2">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/products_denormalized.csv&quot;"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tUnite_1" connectorName="FLOW" label="row1"/>
+    <connection source="tFileInputDelimited_2" target="tUnite_1" connectorName="FLOW" label="row2"/>
+    <connection source="tUnite_1" target="tReplicate_1" connectorName="FLOW"/>
+    <connection source="tReplicate_1" target="tNormalize_1" connectorName="FLOW" label="branch_normalize"/>
+    <connection source="tReplicate_1" target="tDenormalize_1" connectorName="FLOW" label="branch_denormalize"/>
+    <connection source="tNormalize_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tFileOutputDelimited_1" connectorName="FLOW"/>
+    <connection source="tDenormalize_1" target="tFileOutputDelimited_2" connectorName="FLOW"/>
+  </connections>
+</talendJob>

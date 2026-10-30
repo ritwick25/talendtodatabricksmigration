@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Vendor Webhook Dispatch (Stubbed HTTP)" jobId="job_14_http_stub_integration" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Dispatches queued vendor webhooks through a SIDE-EFFECTS Java block: a stubbed HTTP client (no real network) behind a small interface, and a JDBC-style helper that looks up vendor status against a local fixture file the way a real DB lookup would.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/vendor_webhook_queue.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="webhook_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="vendor_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="endpoint_path" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="payload_json" type="id_String" length="500" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- Pattern: SIDE EFFECTS (a stubbed HTTP call behind a small interface -- no real
+// network -- and a JDBC-style helper that "queries" a local fixture file the way a real
+// FixtureJdbcHelper would query a staging table). DERIVED: depends on input_row + local files.
+
+HttpClientStub http = new HttpClientStub();
+FixtureJdbcHelper jdbc = new FixtureJdbcHelper((String)context.source_dir + "/vendor_directory.csv");
+
+boolean vendorActive = jdbc.isVendorActive(input_row.vendor_id);
+HttpResponseStub resp = http.postJson(input_row.endpoint_path, input_row.payload_json);
+
+output_row.webhook_id = input_row.webhook_id;
+output_row.vendor_id = input_row.vendor_id;
+output_row.vendor_active = vendorActive;
+output_row.http_status = resp.statusCode;
+output_row.http_ok = resp.statusCode >= 200 && resp.statusCode < 300;
+
+/** Minimal canned HTTP response -- no real network I/O. */
+static class HttpResponseStub {
+    int statusCode;
+    String body;
+    HttpResponseStub(int c, String b) { statusCode = c; body = b; }
+}
+
+/** Stand-in for a real HTTP client; deterministically derives a status from the payload shape. */
+static class HttpClientStub {
+    HttpResponseStub postJson(String path, String jsonBody) {
+        if (path == null || path.startsWith("/events/unknown")) {
+            return new HttpResponseStub(404, "{\"error\":\"unknown endpoint\"}");
+        }
+        if (jsonBody == null || jsonBody.trim().equals("{}")) {
+            return new HttpResponseStub(422, "{\"error\":\"empty payload\"}");
+        }
+        return new HttpResponseStub(200, "{\"status\":\"accepted\"}");
+    }
+}
+
+/** JDBC-style helper: opens/reads/closes a local CSV fixture the way a real DB lookup would. */
+static class FixtureJdbcHelper {
+    private final String path;
+    FixtureJdbcHelper(String path) { this.path = path; }
+
+    boolean isVendorActive(String vendorId) {
+        java.io.BufferedReader reader = null;
+        try {
+            reader = new java.io.BufferedReader(new java.io.FileReader(path));
+            String header = reader.readLine();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(",", -1);
+                if (parts.length >= 3 && parts[0].equals(vendorId)) {
+                    return "true".equalsIgnoreCase(parts[2].trim());
+                }
+            }
+            return false;
+        } catch (java.io.IOException e) {
+            return false;
+        } finally {
+            if (reader != null) {
+                try { reader.close(); } catch (java.io.IOException ignored) { }
+            }
+        }
+    }
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="webhook_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="vendor_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="vendor_active" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="http_status" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="http_ok" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="560" posY="80" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="webhook_log"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

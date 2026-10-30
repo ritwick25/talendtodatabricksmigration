@@ -1,0 +1,4 @@
+address_id,street,city,state,zip,country
+AD1,  123  main st  , springfield, il, 62704,usa
+AD2,456 Oak Ave,Chicago,IL,60601,USA
+AD3,789 elm St.,,  TX , 75001,usa

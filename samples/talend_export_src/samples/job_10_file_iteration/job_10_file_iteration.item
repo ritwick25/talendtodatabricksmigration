@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Incoming File Iteration" jobId="job_10_file_iteration" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Iterates incoming CSV files with tFileList (globalMap CURRENT_FILEPATH convention), reads each with tFileInputDelimited, converts a row flow to an iteration with tFlowToIterate, and separately loops a hardcoded region-code list with tForeach, accumulating counts via globalMap.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileList" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileList_1">
+      <elementParameter name="DIRECTORY" field="TEXT" value="(String)context.source_dir + &quot;/incoming&quot;"/>
+      <elementParameter name="FILEMASK" field="TEXT" value="*.csv"/>
+    </node>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="320" posY="40" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)globalMap.get(&quot;tFileList_1_CURRENT_FILEPATH&quot;)"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="region_code" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="sales" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJava" componentVersion="0.102" posX="320" posY="150" uniqueName="tJava_2">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJava_2 -- small accumulator (not COMPLEX): runs once per tFileList_1 iteration (ON_COMPONENT_OK
+// trigger), reading the current file path tFileList publishes into globalMap by Talend convention,
+// and maintaining a running total across subjobs/iterations via globalMap (TALEND INTERNALS-adjacent).
+String currentFile = (String)globalMap.get("tFileList_1_CURRENT_FILEPATH");
+Long runningTotal = (Long)globalMap.get("job10_totalFilesSeen");
+if (runningTotal == null) { runningTotal = 0L; }
+runningTotal = runningTotal + 1;
+globalMap.put("job10_totalFilesSeen", runningTotal);
+System.out.println("job_10_file_iteration: processing file #" + runningTotal + " -> " + currentFile);
+]]></elementParameter>
+    </node>
+    <node componentName="tFlowToIterate" componentVersion="0.102" posX="560" posY="40" uniqueName="tFlowToIterate_1">
+      <elementParameter name="ITERATE_FROM" field="TEXT" value="region_code"/>
+    </node>
+    <node componentName="tForeach" componentVersion="0.102" posX="80" posY="280" uniqueName="tForeach_1">
+      <elementParameter name="VALUES" field="TEXT" value="&quot;US&quot;,&quot;EU&quot;,&quot;APAC&quot;"/>
+    </node>
+    <node componentName="tJava" componentVersion="0.102" posX="320" posY="280" uniqueName="tJava_3">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJava_3 -- runs once per tForeach_1 iteration over a hardcoded region-code list.
+// Small (not COMPLEX): just demonstrates globalMap puts/gets across loop iterations.
+String region = (String)globalMap.get("tForeach_1_CURRENT_VALUE");
+java.util.List<String> seen = (java.util.List<String>) globalMap.get("job10_regionsSeen");
+if (seen == null) { seen = new java.util.ArrayList<String>(); }
+seen.add(region);
+globalMap.put("job10_regionsSeen", seen);
+]]></elementParameter>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileList_1" target="tFileInputDelimited_1" connectorName="ON_SUBJOB_OK" condition="((String)globalMap.get(&quot;tFileList_1_CURRENT_FILEPATH&quot;)) != null"/>
+    <connection source="tFileInputDelimited_1" target="tJava_2" connectorName="ON_COMPONENT_OK"/>
+    <connection source="tJava_2" target="tFlowToIterate_1" connectorName="ON_COMPONENT_OK"/>
+    <connection source="tForeach_1" target="tJava_3" connectorName="ON_COMPONENT_OK"/>
+  </connections>
+</talendJob>

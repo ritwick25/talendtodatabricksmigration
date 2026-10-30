@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routine name="InventoryRoutines" synthetic="true">
+  <code><![CDATA[
+package routines;
+
+/**
+ * Synthetic Talend custom routine for job_12_db_upsert_truncate. Demonstrates
+ * routine-calling-routine (computeDelta calls formatDelta) and uses the shared
+ * com.sample.util.ChecksumUtil external lib.
+ */
+public class InventoryRoutines {
+
+    /**
+     * Computes the signed quantity delta between a newly-read row and the previously
+     * staged quantity, then formats it via formatDelta() (routine calling routine).
+     */
+    public static String computeDelta(int newQty, int previousQty, String sku) {
+        int delta = newQty - previousQty;
+        String checksum = com.sample.util.ChecksumUtil.crc32Hex(sku + ":" + newQty);
+        return formatDelta(delta, checksum);
+    }
+
+    /** Formats a delta + checksum pair into the pipe-delimited string tJavaRow_1 persists. */
+    public static String formatDelta(int delta, String checksum) {
+        String sign = delta > 0 ? "+" : (delta < 0 ? "-" : "=");
+        return sign + Math.abs(delta) + "|" + checksum;
+    }
+}
+
+]]></code>
+</routine>

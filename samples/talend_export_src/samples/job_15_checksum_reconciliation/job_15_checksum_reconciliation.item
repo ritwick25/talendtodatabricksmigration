@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Ledger Checksum Reconciliation" jobId="job_15_checksum_reconciliation" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Joins ledger entries to control totals (tMap LEFT/LOAD_ONCE), then runs a NUMERIC Java block (BigDecimal rounding, bitwise flag combination, Luhn/CRC32 checks via the shared external lib, overflow-safe cents conversion) before splitting reconciled vs mismatched rows.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/ledger_entries.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="entry_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="account_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="debit" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="credit" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="entry_date" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="220" uniqueName="tFileInputDelimited_2">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/ledger_control_totals.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="account_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="control_total" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tMap" componentVersion="0.102" posX="320" posY="150" uniqueName="tMap_1">
+      <elementParameter name="MAP_EXPRESSIONS" field="TEXT" value="out_main.entry_id = row1.entry_id; out_main.account_id = row1.account_id; out_main.debit = row1.debit; out_main.credit = row1.credit; out_main.control_total = row2.control_total;"/>
+      <elementParameter name="LOOKUP_row2_JOIN_MODE" field="TEXT" value="Left Outer Join"/>
+      <elementParameter name="LOOKUP_row2_LOAD_MODE" field="TEXT" value="LOAD_ONCE"/>
+      <metadata connector="FLOW">
+        <column name="entry_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="account_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="debit" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="credit" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="control_total" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="560" posY="150" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- runs after tMap_1 joins ledger entries to their control totals (LEFT,
+// LOAD_ONCE). Pattern: NUMERIC (BigDecimal HALF_UP rounding, bitwise flag combination,
+// integer-overflow-safe cents conversion) + EXTERNAL_LIB (com.sample.util.ChecksumUtil).
+// Pure given its row fields (no globalMap/context dependency) -- executed standalone in
+// java_cases/job_15_checksum_reconciliation_tJavaRow_1.json (JAVA_EXECUTED).
+
+final int FLAG_DEBIT = 1, FLAG_CREDIT = 2, FLAG_LARGE = 4, FLAG_MISMATCH = 8;
+
+java.math.BigDecimal debit = input_row.debit.setScale(2, java.math.RoundingMode.HALF_UP);
+java.math.BigDecimal credit = input_row.credit.setScale(2, java.math.RoundingMode.HALF_UP);
+java.math.BigDecimal net = debit.subtract(credit).setScale(2, java.math.RoundingMode.HALF_UP);
+java.math.BigDecimal control = input_row.control_total == null
+        ? java.math.BigDecimal.ZERO : input_row.control_total.setScale(2, java.math.RoundingMode.HALF_UP);
+
+int flags = 0;
+if (debit.compareTo(java.math.BigDecimal.ZERO) > 0) flags |= FLAG_DEBIT;
+if (credit.compareTo(java.math.BigDecimal.ZERO) > 0) flags |= FLAG_CREDIT;
+if (net.abs().compareTo(new java.math.BigDecimal("10000.00")) >= 0) flags |= FLAG_LARGE;
+
+boolean matches = com.sample.util.ChecksumUtil.nearlyEqual(net.doubleValue(), control.doubleValue(), 0.005);
+if (!matches) flags |= FLAG_MISMATCH;
+
+boolean accountLuhnValid = com.sample.util.ChecksumUtil.luhnCheck(input_row.account_id);
+String entryCrc = com.sample.util.ChecksumUtil.crc32Hex(input_row.entry_id);
+long cents = net.movePointRight(2).longValueExact();
+boolean overflowSafe = cents >= Integer.MIN_VALUE && cents <= Integer.MAX_VALUE;
+
+output_row.entry_id = input_row.entry_id;
+output_row.net_amount = net;
+output_row.flags_bitmask = flags;
+output_row.flag_mismatch = (flags & FLAG_MISMATCH) != 0;
+output_row.account_luhn_valid = accountLuhnValid;
+output_row.entry_crc32 = entryCrc;
+output_row.net_cents = cents;
+output_row.cents_int_overflow_safe = overflowSafe;
+
+if (!accountLuhnValid) {
+    System.err.println("tJavaRow_1: account_id for entry " + input_row.entry_id
+            + " failed Luhn validation -- " + describeFlags(flags));
+}
+
+/** Human-readable flag summary for log lines; purely cosmetic, not used in output_row. */
+private String describeFlags(int flags) {
+    StringBuilder sb = new StringBuilder("flags=[");
+    if ((flags & 1) != 0) sb.append("DEBIT ");
+    if ((flags & 2) != 0) sb.append("CREDIT ");
+    if ((flags & 4) != 0) sb.append("LARGE ");
+    if ((flags & 8) != 0) sb.append("MISMATCH ");
+    return sb.append("]").toString();
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="entry_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="net_amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="flags_bitmask" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="flag_mismatch" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="account_luhn_valid" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="entry_crc32" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="net_cents" type="id_Long" length="" precision="" nullable="true" key="false"/>
+        <column name="cents_int_overflow_safe" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFilterRow" componentVersion="0.102" posX="800" posY="150" uniqueName="tFilterRow_1">
+      <elementParameter name="FILTER_EXPRESSION" field="TEXT" value="!flag_mismatch"/>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="1040" posY="100" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="ledger_reconciled"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="1040" posY="260" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/ledger_mismatches.csv&quot;"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tMap_1" connectorName="FLOW" label="row1"/>
+    <connection source="tFileInputDelimited_2" target="tMap_1" connectorName="LOOKUP" label="row2"/>
+    <connection source="tMap_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tFilterRow_1" connectorName="FLOW"/>
+    <connection source="tFilterRow_1" target="tDBOutput_1" connectorName="FLOW" label="reconciled"/>
+    <connection source="tFilterRow_1" target="tFileOutputDelimited_1" connectorName="REJECT" label="mismatches"/>
+  </connections>
+</talendJob>

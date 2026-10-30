@@ -1,0 +1,113 @@
+{
+  "job_id": "job_17_regex_string_parser",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "STRING-HEAVY"
+  ],
+  "source": "JAVA_EXECUTED",
+  "harness_note": "Executed via a standalone Java harness (javac/java, OpenJDK 27) that transliterates the block's core transformation logic with input_row/output_row replaced by plain method parameters/return values. No globalMap/context/cross-row static state is involved, so the transliteration is behavior-preserving. Source files: samples/talend_export_src jars_src (for the external-lib calls) + an ad hoc Harness*.java driver (not checked into this repo).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "priority tag + order id + trailing-empty tags",
+      "input": {
+        "raw_subject": "[URGENT] Re: Order#12345 - refund request",
+        "tag_string": "billing,refund,,urgent,"
+      },
+      "expected_output": {
+        "priority": "URGENT",
+        "order_id": 12345,
+        "subject_clean": "Re: Order#12345 - refund request",
+        "ticket_code": "RE:",
+        "tags_trimmed_split_len": 4,
+        "tags_preserved_split_len": 5,
+        "tags_normalized": "billing; refund; urgent"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "no priority tag -> defaults to NORMAL",
+      "input": {
+        "raw_subject": "Re: Order#99887 shipment delay",
+        "tag_string": "shipping,,delay"
+      },
+      "expected_output": {
+        "priority": "NORMAL",
+        "order_id": 99887,
+        "subject_clean": "Re: Order#99887 shipment delay",
+        "ticket_code": "RE:",
+        "tags_trimmed_split_len": 3,
+        "tags_preserved_split_len": 3,
+        "tags_normalized": "shipping; delay"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "LOW priority, no order id",
+      "input": {
+        "raw_subject": "[LOW] General question",
+        "tag_string": "question"
+      },
+      "expected_output": {
+        "priority": "LOW",
+        "order_id": "",
+        "subject_clean": "General question",
+        "ticket_code": "GEN",
+        "tags_trimmed_split_len": 1,
+        "tags_preserved_split_len": 1,
+        "tags_normalized": "question"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "edge case: priority tag with nothing after it (lookahead fails)",
+      "input": {
+        "raw_subject": "[URGENT]",
+        "tag_string": "urgent,,,"
+      },
+      "expected_output": {
+        "priority": "NORMAL",
+        "order_id": "",
+        "subject_clean": "",
+        "ticket_code": "",
+        "tags_trimmed_split_len": 1,
+        "tags_preserved_split_len": 4,
+        "tags_normalized": "urgent"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "edge case: empty tag_string",
+      "input": {
+        "raw_subject": "No tags here at all Order#1",
+        "tag_string": ""
+      },
+      "expected_output": {
+        "priority": "NORMAL",
+        "order_id": 1,
+        "subject_clean": "No tags here at all Order#1",
+        "ticket_code": "NO ",
+        "tags_trimmed_split_len": 1,
+        "tags_preserved_split_len": 1,
+        "tags_normalized": ""
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "Unicode subject and tag content",
+      "input": {
+        "raw_subject": "[ESCALATED] Caf\u00e9 account issue Order#555",
+        "tag_string": "caf\u00e9,billing,,"
+      },
+      "expected_output": {
+        "priority": "ESCALATED",
+        "order_id": 555,
+        "subject_clean": "Caf\u00e9 account issue Order#555",
+        "ticket_code": "CAF",
+        "tags_trimmed_split_len": 2,
+        "tags_preserved_split_len": 4,
+        "tags_normalized": "caf\u00e9; billing"
+      }
+    }
+  ]
+}

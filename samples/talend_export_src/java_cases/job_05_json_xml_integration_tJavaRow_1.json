@@ -1,0 +1,178 @@
+{
+  "job_id": "job_05_json_xml_integration",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "NUMERIC",
+    "COLLECTIONS",
+    "EXTERNAL_LIB"
+  ],
+  "source": "JAVA_EXECUTED",
+  "harness_note": "Executed via a standalone Java harness (javac/java, OpenJDK 27) that transliterates the block's core transformation logic with input_row/output_row replaced by plain method parameters/return values. No globalMap/context/cross-row static state is involved, so the transliteration is behavior-preserving. Source files: samples/talend_export_src jars_src (for the external-lib calls) + an ad hoc Harness*.java driver (not checked into this repo).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "typical two-item order",
+      "input": {
+        "items": [
+          {
+            "name": "Widget",
+            "qty": 3,
+            "unit_price": "19.99"
+          },
+          {
+            "name": "Gadget",
+            "qty": 1,
+            "unit_price": "99.50"
+          }
+        ],
+        "currency": "USD",
+        "weight_kg": 4.2
+      },
+      "expected_output": {
+        "currency": "USD",
+        "total_amount": 159.47,
+        "item_line_count": 2,
+        "distinct_item_count": 2,
+        "rolling_checksum": 5,
+        "name_crc32": "78BC3CCE",
+        "weight_whole_kg": 4,
+        "surcharge_tier": 0,
+        "weight_valid": true
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "edge case: no items, zero weight",
+      "input": {
+        "items": [],
+        "currency": "USD",
+        "weight_kg": 0.0
+      },
+      "expected_output": {
+        "currency": "USD",
+        "total_amount": 0.0,
+        "item_line_count": 0,
+        "distinct_item_count": 0,
+        "rolling_checksum": 0,
+        "name_crc32": "00000000",
+        "weight_whole_kg": 0,
+        "surcharge_tier": 0,
+        "weight_valid": true
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "large qty, heavy freight tier",
+      "input": {
+        "items": [
+          {
+            "name": "Bolt",
+            "qty": 1000,
+            "unit_price": "0.01"
+          }
+        ],
+        "currency": "EUR",
+        "weight_kg": 250.7
+      },
+      "expected_output": {
+        "currency": "EUR",
+        "total_amount": 10.0,
+        "item_line_count": 1,
+        "distinct_item_count": 1,
+        "rolling_checksum": 1000,
+        "name_crc32": "CDF25239",
+        "weight_whole_kg": 250,
+        "surcharge_tier": 25,
+        "weight_valid": true
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "duplicate item name merges in distinct_item_count",
+      "input": {
+        "items": [
+          {
+            "name": "Widget",
+            "qty": 2,
+            "unit_price": "19.99"
+          },
+          {
+            "name": "Widget",
+            "qty": 3,
+            "unit_price": "19.99"
+          }
+        ],
+        "currency": "USD",
+        "weight_kg": 12.9
+      },
+      "expected_output": {
+        "currency": "USD",
+        "total_amount": 99.95,
+        "item_line_count": 2,
+        "distinct_item_count": 1,
+        "rolling_checksum": 8,
+        "name_crc32": "4B1A7594",
+        "weight_whole_kg": 12,
+        "surcharge_tier": 1,
+        "weight_valid": true
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "sub-cent unit price forces HALF_UP rounding",
+      "input": {
+        "items": [
+          {
+            "name": "Crate",
+            "qty": 1,
+            "unit_price": "150.333"
+          }
+        ],
+        "currency": "GBP",
+        "weight_kg": 99.95
+      },
+      "expected_output": {
+        "currency": "GBP",
+        "total_amount": 150.33,
+        "item_line_count": 1,
+        "distinct_item_count": 1,
+        "rolling_checksum": 1,
+        "name_crc32": "27D935A1",
+        "weight_whole_kg": 99,
+        "surcharge_tier": 9,
+        "weight_valid": true
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "edge case: negative weight marks weight_valid=false",
+      "input": {
+        "items": [
+          {
+            "name": "A",
+            "qty": 1,
+            "unit_price": "1.005"
+          },
+          {
+            "name": "B",
+            "qty": 1,
+            "unit_price": "2.005"
+          }
+        ],
+        "currency": "USD",
+        "weight_kg": -1.0
+      },
+      "expected_output": {
+        "currency": "USD",
+        "total_amount": 3.01,
+        "item_line_count": 2,
+        "distinct_item_count": 2,
+        "rolling_checksum": 3,
+        "name_crc32": "30694C07",
+        "weight_whole_kg": -1,
+        "surcharge_tier": 0,
+        "weight_valid": false
+      }
+    }
+  ]
+}

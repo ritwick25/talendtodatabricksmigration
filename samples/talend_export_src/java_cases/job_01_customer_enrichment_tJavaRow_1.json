@@ -1,0 +1,139 @@
+{
+  "job_id": "job_01_customer_enrichment",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "STATEFUL",
+    "NUMERIC",
+    "EXTERNAL_LIB"
+  ],
+  "source": "DERIVED",
+  "derivation_note": "DERIVED: the block maintains a static HashSet<String> (processedCustomerIds) and an AtomicLong counter across all rows in the run, and publishes to globalMap -- exactly the 'static counters ... tJavaFlex start/main/end shared state, ... globalMap, input_row/output_row' coupling the brief calls out. Reasoned through row-by-row in processing order; the BigDecimal valuation sub-formula (computeLoyaltyValue) is pure and was checked by hand: base = points * 0.01, multiplier 1.50/1.25/1.00/0.00 by tier, scaled HALF_UP to 2dp.",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "first row, Platinum tier, normal name",
+      "input": {
+        "customer_id": 1001,
+        "first_name": "jane",
+        "last_name": "doe",
+        "email": "jane.doe@example.com",
+        "loyalty_points": 1250,
+        "tier_name": "Platinum",
+        "region_name": "North America"
+      },
+      "expected_output": {
+        "customer_id": 1001,
+        "full_name": "Jane Doe",
+        "email_masked": "j***e@example.com",
+        "loyalty_value": "18.75",
+        "region_name": "North America",
+        "tier_name": "Platinum",
+        "_note": "1250*0.01=12.50 * 1.50 = 18.75; dedupe set now contains '1001'"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "duplicate customer_id seen already this run -> row dropped (no output_row emitted)",
+      "input": {
+        "customer_id": 1001,
+        "first_name": "jane",
+        "last_name": "doe",
+        "email": "jane.doe@example.com",
+        "loyalty_points": 1250,
+        "tier_name": "Platinum",
+        "region_name": "North America"
+      },
+      "expected_output": {
+        "_note": "processedCustomerIds already contains '1001' -> method returns early, no output_row fields set, rowsProcessedCounter NOT incremented"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: null first_name (fixtures/customers.csv row 1004)",
+      "input": {
+        "customer_id": 1004,
+        "first_name": null,
+        "last_name": "garcia",
+        "email": "bad-email-missing-first-name",
+        "loyalty_points": 0,
+        "tier_name": null,
+        "region_name": "North America"
+      },
+      "expected_output": {
+        "customer_id": 1004,
+        "full_name": "Garcia",
+        "email_masked": "bad-email-missing-first-name",
+        "loyalty_value": "0.00",
+        "region_name": "North America",
+        "tier_name": null,
+        "_note": "safe(null)='' so fullName normalizes to 'Garcia'; maskEmail returns input unchanged (no @ match); tier_name null -> multiplier 0.00 -> loyalty_value 0.00; NOTE this row would already be filtered upstream by tMap_1's is_valid expression since email has no '@', so in the real job this input never reaches tJavaRow_1 -- shown here only to document the Java block's own null-handling"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "Gold tier multiplier",
+      "input": {
+        "customer_id": 1005,
+        "first_name": "amara",
+        "last_name": "okafor",
+        "email": "amara.okafor@example.ng",
+        "loyalty_points": 999,
+        "tier_name": "Gold",
+        "region_name": "Africa"
+      },
+      "expected_output": {
+        "customer_id": 1005,
+        "full_name": "Amara Okafor",
+        "email_masked": "a***a@example.ng",
+        "loyalty_value": "12.49",
+        "region_name": "Africa",
+        "tier_name": "Gold",
+        "_note": "999*0.01=9.99 * 1.25 = 12.4875 -> HALF_UP to 12.49"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "edge case: short local-part email (<=2 chars) uses the 2-char mask branch",
+      "input": {
+        "customer_id": 1006,
+        "first_name": "erik",
+        "last_name": "larsson",
+        "email": "el@example.se",
+        "loyalty_points": 1500,
+        "tier_name": "Platinum",
+        "region_name": "Europe"
+      },
+      "expected_output": {
+        "customer_id": 1006,
+        "full_name": "Erik Larsson",
+        "email_masked": "e***@example.se",
+        "loyalty_value": "22.50",
+        "region_name": "Europe",
+        "tier_name": "Platinum",
+        "_note": "maskEmail: local='el' length<=2 -> 'e'+'***'+'@example.se'; 1500*0.01=15.00*1.50=22.50"
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "Standard (unrecognized) tier name falls to multiplier 1.00",
+      "input": {
+        "customer_id": 1002,
+        "first_name": "marco",
+        "last_name": "rossi",
+        "email": "marco.rossi@example.it",
+        "loyalty_points": 480,
+        "tier_name": "Bronze",
+        "region_name": "Europe"
+      },
+      "expected_output": {
+        "customer_id": 1002,
+        "full_name": "Marco Rossi",
+        "email_masked": "m***o@example.it",
+        "loyalty_value": "4.80",
+        "region_name": "Europe",
+        "tier_name": "Bronze",
+        "_note": "'Bronze' matches neither Platinum nor Gold -> multiplier 1.00; 480*0.01=4.80*1.00=4.80"
+      }
+    }
+  ]
+}

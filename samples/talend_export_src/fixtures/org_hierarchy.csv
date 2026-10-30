@@ -1,0 +1,8 @@
+employee_id,manager_id,name,level_hint
+E100,,Dana Kim,EXEC
+E101,E100,Omar Haddad,DIR
+E102,E101,Priya Nair,MGR
+E103,E102,Sam Lee,IC
+E200,E202,Cycle A,MGR
+E201,E200,Cycle B,MGR
+E202,E201,Cycle C,MGR

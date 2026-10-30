@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Order Deduplication &amp; Ranking" jobId="job_02_order_deduplication" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Joins orders to customers (tJoin, inner), dedupes on order_id (tUniqRow with reject), sorts (tSortRow), aggregates totals per customer (tAggregateRow), then ranks customers and tiers them with a COLLECTIONS-pattern tJavaFlex block before inserting into order_summary.</description>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/orders.csv&quot;"/>
+      <elementParameter name="FIELDSEPARATOR" field="TEXT" value=","/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="order_id" type="id_String" length="10" precision="" nullable="true" key="true"/>
+        <column name="customer_id" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="order_date" type="id_String" length="10" precision="" nullable="true" key="false"/>
+        <column name="amount" type="id_BigDecimal" length="12" precision="2" nullable="true" key="false"/>
+        <column name="status" type="id_String" length="12" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="220" uniqueName="tFileInputDelimited_2">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/customers.csv&quot;"/>
+      <elementParameter name="FIELDSEPARATOR" field="TEXT" value=","/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="customer_id" type="id_Integer" length="" precision="" nullable="true" key="true"/>
+        <column name="country_code" type="id_String" length="2" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJoin" componentVersion="0.102" posX="320" posY="150" uniqueName="tJoin_1">
+      <elementParameter name="JOIN_MODEL" field="TEXT" value="Inner Join"/>
+      <elementParameter name="MATCHING_MODE" field="TEXT" value="unique match"/>
+      <elementParameter name="JOIN_KEY" field="TEXT" value="customer_id=customer_id"/>
+      <metadata connector="FLOW">
+        <column name="order_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="customer_id" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="order_date" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="status" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="country_code" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tUniqRow" componentVersion="0.102" posX="560" posY="150" uniqueName="tUniqRow_1">
+      <elementParameter name="KEY_ATTRIBUTE" field="TEXT" value="order_id"/>
+      <elementParameter name="GENERATE_REJECT" field="TEXT" value="true"/>
+    </node>
+    <node componentName="tSortRow" componentVersion="0.102" posX="800" posY="100" uniqueName="tSortRow_1">
+      <elementParameter name="SORT_KEYS" field="TEXT" value="order_date:ASC,amount:DESC"/>
+    </node>
+    <node componentName="tAggregateRow" componentVersion="0.102" posX="800" posY="260" uniqueName="tAggregateRow_1">
+      <elementParameter name="GROUP_BY" field="TEXT" value="customer_id"/>
+      <elementParameter name="OPERATIONS" field="TEXT" value="total_amount=SUM(amount);order_count=COUNT(order_id)"/>
+      <metadata connector="FLOW">
+        <column name="customer_id" type="id_Integer" length="" precision="" nullable="true" key="true"/>
+        <column name="total_amount" type="id_BigDecimal" length="12" precision="2" nullable="true" key="false"/>
+        <column name="order_count" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaFlex" componentVersion="0.102" posX="1040" posY="260" uniqueName="tJavaFlex_1">
+      <elementParameter name="START_CODE" field="CODE"><![CDATA[
+// tJavaFlex_1 START -- runs once before the first aggregated row. Accumulates parallel
+// lists (avoids declaring a top-level class in this inline snippet) for the COLLECTIONS
+// ranking pass performed in END_CODE below.
+custCustomerIds = new java.util.ArrayList<String>();
+custTotals = new java.util.ArrayList<java.math.BigDecimal>();
+custCounts = new java.util.ArrayList<Integer>();
+]]></elementParameter>
+      <elementParameter name="MAIN_CODE" field="CODE"><![CDATA[
+// tJavaFlex_1 MAIN -- runs once per row coming out of tAggregateRow_1 (one row per customer).
+custCustomerIds.add(String.valueOf(input_row.customer_id));
+custTotals.add(input_row.total_amount == null ? java.math.BigDecimal.ZERO : input_row.total_amount);
+custCounts.add(input_row.order_count == null ? Integer.valueOf(0) : input_row.order_count);
+]]></elementParameter>
+      <elementParameter name="END_CODE" field="CODE"><![CDATA[
+// tJavaFlex_1 END -- runs once after the last row. Pattern: COLLECTIONS (custom Comparator,
+// grouping into a tier-count map). NOTE: the exact Talend tJavaFlex multi-row output-collector
+// API is elided here (this export is never compiled in real Studio) -- each 'r' below is
+// conceptually pushed downstream as one output row (customer_id, rank, tier, total_amount, order_count).
+java.util.List<CustomerAgg> customers = new java.util.ArrayList<CustomerAgg>();
+for (int i = 0; i < custCustomerIds.size(); i++) {
+    customers.add(new CustomerAgg(custCustomerIds.get(i), custTotals.get(i), custCounts.get(i)));
+}
+java.util.List<CustomerAgg> ranked = rankCustomers(customers);
+java.util.Map<String, Integer> tiers = tierCounts(ranked);
+globalMap.put("job02_tierCounts", tiers);
+for (CustomerAgg r : ranked) {
+    System.out.println("ranked customer=" + r.customerId + " rank=" + r.rank + " tier=" + r.tier);
+}
+
+/** Parallel-array row carrier for the ranking pass; not a real Talend row type. */
+static class CustomerAgg {
+    String customerId; java.math.BigDecimal totalAmount; int orderCount; int rank; String tier;
+    CustomerAgg(String c, java.math.BigDecimal t, int o) { customerId = c; totalAmount = t; orderCount = o; }
+}
+
+/**
+ * Pure ranking helper: sorts descending by totalAmount, ties broken ascending by customerId,
+ * then assigns a 1-based rank and a tier label. Executed standalone (input_row/output_row
+ * replaced by a List<CustomerAgg> parameter) in java_cases/job_02_order_deduplication_tJavaFlex_1.json.
+ */
+private java.util.List<CustomerAgg> rankCustomers(java.util.List<CustomerAgg> customers) {
+    java.util.List<CustomerAgg> sorted = new java.util.ArrayList<CustomerAgg>(customers);
+    java.util.Collections.sort(sorted, new java.util.Comparator<CustomerAgg>() {
+        public int compare(CustomerAgg a, CustomerAgg b) {
+            int byAmount = b.totalAmount.compareTo(a.totalAmount);
+            if (byAmount != 0) return byAmount;
+            return a.customerId.compareTo(b.customerId);
+        }
+    });
+    int rank = 1;
+    for (CustomerAgg c : sorted) {
+        c.rank = rank++;
+        c.tier = tierFor(c.totalAmount);
+    }
+    return sorted;
+}
+
+private String tierFor(java.math.BigDecimal totalAmount) {
+    if (totalAmount.compareTo(new java.math.BigDecimal("1000")) >= 0) return "PLATINUM";
+    if (totalAmount.compareTo(new java.math.BigDecimal("500")) >= 0) return "GOLD";
+    if (totalAmount.signum() < 0) return "REVIEW";
+    return "STANDARD";
+}
+
+private java.util.Map<String, Integer> tierCounts(java.util.List<CustomerAgg> ranked) {
+    java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<String, Integer>();
+    for (CustomerAgg r : ranked) {
+        Integer cur = counts.get(r.tier);
+        counts.put(r.tier, cur == null ? Integer.valueOf(1) : Integer.valueOf(cur + 1));
+    }
+    return counts;
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="customer_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="rank" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="tier" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="total_amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="order_count" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="1280" posY="260" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="order_summary"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="DBTYPE" field="TEXT" value="PostgreSQL"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="560" posY="320" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/orders_duplicate_rejects.csv&quot;"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tJoin_1" connectorName="FLOW" label="row1"/>
+    <connection source="tFileInputDelimited_2" target="tJoin_1" connectorName="LOOKUP" label="row2"/>
+    <connection source="tJoin_1" target="tUniqRow_1" connectorName="FLOW"/>
+    <connection source="tUniqRow_1" target="tSortRow_1" connectorName="FLOW" label="uniques"/>
+    <connection source="tUniqRow_1" target="tFileOutputDelimited_1" connectorName="REJECT" label="duplicates"/>
+    <connection source="tSortRow_1" target="tAggregateRow_1" connectorName="FLOW"/>
+    <connection source="tAggregateRow_1" target="tJavaFlex_1" connectorName="FLOW"/>
+    <connection source="tJavaFlex_1" target="tDBOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

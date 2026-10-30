@@ -1,0 +1,5 @@
+row_id,status_code,amount
+R1,OK,100.00
+R2,RETRY,0.00
+R3,FAIL,-5.00
+R4,UNKNOWN,50.00

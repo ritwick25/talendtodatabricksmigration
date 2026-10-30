@@ -1,0 +1,4 @@
+webhook_id,vendor_id,endpoint_path,payload_json
+WH1,V100,/events/order-created,"{""order_id"":""ORD1001""}"
+WH2,V200,/events/order-shipped,"{""order_id"":""ORD1002""}"
+WH3,V999,/events/unknown,"{}"

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Inventory Upsert with Truncate Staging" jobId="job_12_db_upsert_truncate" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Truncates a staging table (tDBRow custom SQL), reads watermark-filtered inventory rows via custom SQL (tDBInput), computes a signed delta with a routine-calling-routine custom routine (TALEND INTERNALS + EXTERNAL_LIB Java), and upserts into inventory_master (tDBOutput).</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tDBInput" componentVersion="0.102" posX="80" posY="80" uniqueName="tDBInput_1">
+      <elementParameter name="QUERY" field="TEXT" value="SELECT sku, warehouse_id, qty_on_hand, last_updated FROM inventory_raw WHERE last_updated &gt; TIMESTAMP &#x27;&quot; + (String)context.watermark_ts + &quot;&#x27;"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+      <metadata connector="FLOW">
+        <column name="sku" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="warehouse_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="qty_on_hand" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="last_updated" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBRow" componentVersion="0.102" posX="80" posY="260" uniqueName="tDBRow_1">
+      <elementParameter name="QUERY" field="TEXT" value="TRUNCATE TABLE staging.inventory_staging"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- runs after tDBInput_1 (custom SQL, watermark-filtered) and before tDBOutput_1
+// (upsert). Pattern: TALEND INTERNALS (globalMap, context.watermark_ts, input_row/output_row,
+// routine-calling-routine via routines.InventoryRoutines) + EXTERNAL_LIB (ChecksumUtil, used
+// transitively inside the routine). DERIVED: depends on globalMap/context/routine state.
+
+if (rowsSinceWatermark == null) { rowsSinceWatermark = 0; }
+rowsSinceWatermark++;
+globalMap.put("job12_rowsSinceWatermark", rowsSinceWatermark);
+
+Integer previousQty = (Integer) globalMap.get("job12_prevQty_" + input_row.sku);
+int prev = previousQty == null ? 0 : previousQty;
+
+String deltaFormatted = routines.InventoryRoutines.computeDelta(input_row.qty_on_hand, prev, input_row.sku);
+globalMap.put("job12_prevQty_" + input_row.sku, input_row.qty_on_hand);
+
+output_row.sku = input_row.sku;
+output_row.warehouse_id = input_row.warehouse_id;
+output_row.qty_on_hand = input_row.qty_on_hand;
+output_row.delta_formatted = deltaFormatted;
+output_row.watermark_used = (String) context.watermark_ts;
+
+boolean stale = isStaleAgainstWatermark(input_row.last_updated, (String) context.watermark_ts);
+if (stale) {
+    System.err.println("tJavaRow_1: row for sku=" + input_row.sku + " has last_updated="
+            + input_row.last_updated + " which is NOT after watermark " + context.watermark_ts
+            + " -- tDBInput_1's WHERE clause should have already excluded this row.");
+}
+
+String auditLine = buildAuditLine(input_row.sku, input_row.warehouse_id, deltaFormatted, rowsSinceWatermark);
+System.out.println(auditLine);
+
+/**
+ * Sanity cross-check that the row actually satisfies the watermark predicate tDBInput_1's
+ * custom SQL applied upstream. Pure string-compare (both are already "yyyy-MM-dd HH:mm:ss").
+ */
+private boolean isStaleAgainstWatermark(String lastUpdated, String watermark) {
+    if (lastUpdated == null || watermark == null) {
+        return true;
+    }
+    return lastUpdated.compareTo(watermark) <= 0;
+}
+
+/** Consistent one-line audit format shared by every row this block processes. */
+private String buildAuditLine(String sku, String warehouseId, String delta, int rowNumber) {
+    return String.format("[inventory-upsert #%d] sku=%s warehouse=%s delta=%s", rowNumber, sku, warehouseId, delta);
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="sku" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="warehouse_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="qty_on_hand" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="delta_formatted" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="watermark_used" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="560" posY="80" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="inventory_master"/>
+      <elementParameter name="ACTION" field="TEXT" value="UPDATE_OR_INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tDBRow_1" target="tDBInput_1" connectorName="ON_SUBJOB_OK"/>
+    <connection source="tDBInput_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

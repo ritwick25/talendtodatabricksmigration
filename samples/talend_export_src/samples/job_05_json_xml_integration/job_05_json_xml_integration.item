@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Order/Shipment JSON+XML Integration" jobId="job_05_json_xml_integration" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Extracts order-event fields from JSON (tExtractJSONFields) and shipment fields from XML (tXMLMap), merges them via tMap lookup, then runs a NUMERIC+COLLECTIONS Java block (BigDecimal rounding, item-count grouping, external-lib checksums) before inserting into order_shipment_reconciled.</description>
+  <nodes>
+    <node componentName="tFileInputJSON" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputJSON_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/order_events.json&quot;"/>
+      <elementParameter name="JSONPATH" field="TEXT" value="$[*]"/>
+      <metadata connector="FLOW">
+        <column name="event_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="payload" type="id_String" length="2000" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tExtractJSONFields" componentVersion="0.102" posX="320" posY="80" uniqueName="tExtractJSONFields_1">
+      <elementParameter name="MAPPING" field="TEXT" value="order_id=$.order_id;event_type=$.event_type;amount=$.amount;currency=$.currency;item_names=$.items[*].name;item_qtys=$.items[*].qty;item_unit_prices=$.items[*].unit_price"/>
+      <metadata connector="FLOW">
+        <column name="order_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="event_type" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="amount" type="id_Double" length="" precision="" nullable="true" key="false"/>
+        <column name="currency" type="id_String" length="3" precision="" nullable="true" key="false"/>
+        <column name="item_names" type="id_List" length="" precision="" nullable="true" key="false"/>
+        <column name="item_qtys" type="id_List" length="" precision="" nullable="true" key="false"/>
+        <column name="item_unit_prices" type="id_List" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFileInputXML" componentVersion="0.102" posX="80" posY="260" uniqueName="tFileInputXML_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/shipments.xml&quot;"/>
+      <elementParameter name="XPATH_LOOP" field="TEXT" value="/Shipments/Shipment"/>
+      <metadata connector="FLOW">
+        <column name="ShipmentId" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="OrderId" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="Carrier" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="WeightKg" type="id_Double" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tXMLMap" componentVersion="0.102" posX="320" posY="260" uniqueName="tXMLMap_1">
+      <elementParameter name="MAPPING" field="TEXT" value="shipment_id=ShipmentId;order_id=OrderId;carrier=Carrier;weight_kg=WeightKg"/>
+      <metadata connector="FLOW">
+        <column name="shipment_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="order_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="carrier" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="weight_kg" type="id_Double" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tMap" componentVersion="0.102" posX="560" posY="150" uniqueName="tMap_1">
+      <elementParameter name="MAP_EXPRESSIONS" field="TEXT" value="out_main.order_id = row1.order_id; out_main.currency = row1.currency; out_main.item_names = row1.item_names; out_main.item_qtys = row1.item_qtys; out_main.item_unit_prices = row1.item_unit_prices; out_main.weight_kg = row2.weight_kg;"/>
+      <elementParameter name="LOOKUP_row2_JOIN_MODE" field="TEXT" value="Left Outer Join"/>
+      <elementParameter name="LOOKUP_row2_LOAD_MODE" field="TEXT" value="LOAD_ONCE"/>
+      <metadata connector="FLOW">
+        <column name="order_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="currency" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="item_names" type="id_List" length="" precision="" nullable="true" key="false"/>
+        <column name="item_qtys" type="id_List" length="" precision="" nullable="true" key="false"/>
+        <column name="item_unit_prices" type="id_List" length="" precision="" nullable="true" key="false"/>
+        <column name="weight_kg" type="id_Double" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="800" posY="150" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- runs after tMap_1 merges the tExtractJSONFields_1 flow with the tXMLMap_1
+// shipment flow on order_id. Patterns: NUMERIC (BigDecimal rounding, integer division),
+// COLLECTIONS (item-count grouping), EXTERNAL_LIB (com.sample.util.ChecksumUtil).
+
+java.util.List<String> itemNames = input_row.item_names; // List<String>, one entry per JSON item
+java.util.List<Integer> itemQtys = input_row.item_qtys;
+java.util.List<String> itemPrices = input_row.item_unit_prices;
+
+java.math.BigDecimal total = java.math.BigDecimal.ZERO;
+java.util.Map<String, Integer> counts = new java.util.LinkedHashMap<String, Integer>();
+int[] qtys = new int[itemNames.size()];
+StringBuilder nameConcat = new StringBuilder();
+for (int i = 0; i < itemNames.size(); i++) {
+    java.math.BigDecimal price = new java.math.BigDecimal(itemPrices.get(i));
+    java.math.BigDecimal lineTotal = price.multiply(java.math.BigDecimal.valueOf(itemQtys.get(i)));
+    total = total.add(lineTotal);
+    Integer cur = counts.get(itemNames.get(i));
+    counts.put(itemNames.get(i), cur == null ? itemQtys.get(i) : cur + itemQtys.get(i));
+    qtys[i] = itemQtys.get(i);
+    nameConcat.append(itemNames.get(i));
+}
+total = total.setScale(2, java.math.RoundingMode.HALF_UP);
+
+long rollingChecksum = com.sample.util.ChecksumUtil.rollingChecksum(qtys);
+String nameCrc = com.sample.util.ChecksumUtil.crc32Hex(nameConcat.toString());
+
+int wholeKg = (int) Math.floor(input_row.weight_kg);
+int surchargeTier = wholeKg / 10; // integer division
+
+output_row.order_id = input_row.order_id;
+output_row.currency = input_row.currency;
+output_row.total_amount = total;
+output_row.item_line_count = itemNames.size();
+output_row.distinct_item_count = counts.size();
+output_row.rolling_checksum = rollingChecksum;
+output_row.name_crc32 = nameCrc;
+output_row.weight_whole_kg = wholeKg;
+output_row.surcharge_tier = surchargeTier;
+output_row.weight_valid = (input_row.weight_kg >= 0 && input_row.weight_kg < 1000);
+
+if (!isValidCurrencyCode(input_row.currency)) {
+    System.err.println("tJavaRow_1: unrecognized currency code '" + input_row.currency
+            + "' for order " + input_row.order_id + " -- downstream FX logic may misbehave.");
+}
+
+/**
+ * Small allow-list check for the handful of currencies this reconciliation path supports.
+ * Not exhaustive (ISO 4217 has ~180 codes) -- deliberately narrow for this synthetic feed.
+ */
+private boolean isValidCurrencyCode(String currency) {
+    if (currency == null) {
+        return false;
+    }
+    switch (currency) {
+        case "USD":
+        case "EUR":
+        case "GBP":
+            return true;
+        default:
+            return false;
+    }
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="order_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="currency" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="total_amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+        <column name="item_line_count" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="distinct_item_count" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="rolling_checksum" type="id_Long" length="" precision="" nullable="true" key="false"/>
+        <column name="name_crc32" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="weight_whole_kg" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="surcharge_tier" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="weight_valid" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="1040" posY="150" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="order_shipment_reconciled"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputJSON_1" target="tExtractJSONFields_1" connectorName="FLOW"/>
+    <connection source="tFileInputXML_1" target="tXMLMap_1" connectorName="FLOW"/>
+    <connection source="tExtractJSONFields_1" target="tMap_1" connectorName="FLOW" label="row1"/>
+    <connection source="tXMLMap_1" target="tMap_1" connectorName="LOOKUP" label="row2"/>
+    <connection source="tMap_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

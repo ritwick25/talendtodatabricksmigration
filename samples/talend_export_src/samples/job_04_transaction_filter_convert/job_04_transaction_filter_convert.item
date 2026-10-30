@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Transaction Log Filter &amp; Convert" jobId="job_04_transaction_filter_convert" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Extracts pipe-delimited transaction fields from raw log lines via regex, filters on status, converts the amount to BigDecimal, and runs a DATE/TIME Java block (multi-pattern parsing, leap-year and month-end statement-cutoff logic) before inserting into transactions_clean.</description>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/transactions_raw.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="raw_line" type="id_String" length="200" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tExtractRegexFields" componentVersion="0.102" posX="320" posY="80" uniqueName="tExtractRegexFields_1">
+      <elementParameter name="REGEX" field="TEXT" value="TXN\\|(?&lt;date&gt;[^|]+)\\|(?&lt;cust&gt;[^|]+)\\|AMT:(?&lt;amt&gt;[^|]+)\\|STATUS:(?&lt;status&gt;.+)"/>
+      <metadata connector="FLOW">
+        <column name="txn_date_raw" type="id_String" length="20" precision="" nullable="true" key="false"/>
+        <column name="customer_id" type="id_String" length="20" precision="" nullable="true" key="false"/>
+        <column name="amount_str" type="id_String" length="20" precision="" nullable="true" key="false"/>
+        <column name="status_raw" type="id_String" length="10" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tFilterRow" componentVersion="0.102" posX="560" posY="80" uniqueName="tFilterRow_1">
+      <elementParameter name="FILTER_EXPRESSION" field="TEXT" value="status_raw.equals(&quot;OK&quot;)"/>
+    </node>
+    <node componentName="tConvertType" componentVersion="0.102" posX="800" posY="80" uniqueName="tConvertType_1">
+      <elementParameter name="CONVERSIONS" field="TEXT" value="amount_str:String-&gt;amount:BigDecimal"/>
+      <metadata connector="FLOW">
+        <column name="txn_date_raw" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="customer_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="amount_str" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="amount" type="id_BigDecimal" length="12" precision="2" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="1040" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- runs after tExtractRegexFields_1 / tFilterRow_1 / tConvertType_1, which have
+// already pulled txn_date_raw and amount_str into plain String fields. Pattern: DATE/TIME
+// (SimpleDateFormat multi-pattern fallback, Calendar arithmetic, month-end/leap-year handling).
+
+java.util.Date parsed = parseFlexible(input_row.txn_date_raw);
+if (parsed == null) {
+    output_row.txn_id = input_row.customer_id;
+    output_row.valid = false;
+    output_row.parsed_date = null;
+    return;
+}
+
+java.util.Calendar cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"));
+cal.setTime(parsed);
+cal.set(java.util.Calendar.HOUR_OF_DAY, 0); cal.set(java.util.Calendar.MINUTE, 0);
+cal.set(java.util.Calendar.SECOND, 0); cal.set(java.util.Calendar.MILLISECOND, 0);
+
+int year = cal.get(java.util.Calendar.YEAR);
+boolean leap = isLeapYear(year);
+int day = cal.get(java.util.Calendar.DAY_OF_MONTH);
+int lastDay = cal.getActualMaximum(java.util.Calendar.DAY_OF_MONTH);
+boolean monthEnd = (day == lastDay);
+
+java.util.Calendar cutoff = (java.util.Calendar) cal.clone();
+if (monthEnd) {
+    cutoff.add(java.util.Calendar.DAY_OF_MONTH, 1);
+    int dow = cutoff.get(java.util.Calendar.DAY_OF_WEEK);
+    while (dow == java.util.Calendar.SATURDAY || dow == java.util.Calendar.SUNDAY) {
+        cutoff.add(java.util.Calendar.DAY_OF_MONTH, 1);
+        dow = cutoff.get(java.util.Calendar.DAY_OF_WEEK);
+    }
+}
+
+boolean amountOk;
+try {
+    double amt = Double.parseDouble(input_row.amount_str);
+    amountOk = amt >= 0.0;
+} catch (Exception e) {
+    amountOk = false;
+}
+
+output_row.txn_id = input_row.customer_id;
+output_row.valid = true;
+output_row.parsed_date = iso(cal);
+output_row.is_leap_year = leap;
+output_row.is_month_end = monthEnd;
+output_row.statement_cutoff_date = iso(cutoff);
+output_row.amount_valid = amountOk;
+
+private static final String[] PATTERNS = {"yyyy-MM-dd", "yyyy/MM/dd", "MM/dd/yyyy", "dd-MM-yyyy", "yyyyMMdd"};
+
+private java.util.Date parseFlexible(String s) {
+    if (s == null || s.trim().isEmpty()) return null;
+    for (String p : PATTERNS) {
+        java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat(p);
+        sdf.setLenient(false);
+        try { return sdf.parse(s.trim()); } catch (java.text.ParseException ignored) { }
+    }
+    return null;
+}
+
+private boolean isLeapYear(int year) {
+    return (year % 4 == 0) && (year % 100 != 0 || year % 400 == 0);
+}
+
+private String iso(java.util.Calendar c) {
+    return String.format("%04d-%02d-%02d",
+            c.get(java.util.Calendar.YEAR), c.get(java.util.Calendar.MONTH) + 1, c.get(java.util.Calendar.DAY_OF_MONTH));
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="txn_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="valid" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="parsed_date" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="is_leap_year" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="is_month_end" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="statement_cutoff_date" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="amount_valid" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="1280" posY="80" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="transactions_clean"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+    <node componentName="tFileOutputDelimited" componentVersion="0.102" posX="560" posY="260" uniqueName="tFileOutputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/../fixtures_output/transactions_invalid_status.csv&quot;"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tExtractRegexFields_1" connectorName="FLOW"/>
+    <connection source="tExtractRegexFields_1" target="tFilterRow_1" connectorName="FLOW"/>
+    <connection source="tFilterRow_1" target="tConvertType_1" connectorName="FLOW" label="filtered"/>
+    <connection source="tFilterRow_1" target="tFileOutputDelimited_1" connectorName="REJECT" label="rejected"/>
+    <connection source="tConvertType_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

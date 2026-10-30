@@ -1,0 +1,766 @@
+{
+  "jobs": [
+    {
+      "job_id": "job_01_customer_enrichment",
+      "display_name": "Customer Enrichment",
+      "description": "Enriches raw customer extracts with region (inner join, load-once) and loyalty-tier (left join, reload-at-each-row) lookups via tMap, computes a masked email and a BigDecimal loyalty valuation in Java, dedupes by customer_id, and upserts into customers_enriched.",
+      "components": [
+        "tFileInputDelimited",
+        "tMap",
+        "tJavaRow",
+        "tDBOutput",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 7,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "STATEFUL",
+            "NUMERIC",
+            "EXTERNAL_LIB"
+          ],
+          "lines": 68,
+          "uses_external_lib": true,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "MEDIUM",
+      "coverage_notes": "tMap multi-lookup (inner + left/reload-at-each-row), expression filter with reject, tDBOutput upsert, context-driven JDBC/schema, STATEFUL+NUMERIC+EXTERNAL_LIB Java.",
+      "fixtures_used": [
+        "fixtures/customers.csv",
+        "fixtures/regions.csv",
+        "fixtures/loyalty_tiers.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_02_order_deduplication",
+      "display_name": "Order Deduplication & Ranking",
+      "description": "Joins orders to customers (tJoin, inner), dedupes on order_id (tUniqRow with reject), sorts (tSortRow), aggregates totals per customer (tAggregateRow), then ranks customers and tiers them with a COLLECTIONS-pattern tJavaFlex block before inserting into order_summary.",
+      "components": [
+        "tFileInputDelimited",
+        "tJoin",
+        "tUniqRow",
+        "tSortRow",
+        "tAggregateRow",
+        "tJavaFlex",
+        "tDBOutput",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 9,
+      "java_blocks": [
+        {
+          "block_id": "tJavaFlex_1",
+          "pattern_tags": [
+            "COLLECTIONS"
+          ],
+          "lines": 70,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "MEDIUM",
+      "coverage_notes": "tJoin inner join, tUniqRow dedupe+reject, tSortRow multi-key, tAggregateRow group/sum/count, COLLECTIONS tJavaFlex ranking with custom Comparator.",
+      "fixtures_used": [
+        "fixtures/orders.csv",
+        "fixtures/customers.csv"
+      ],
+      "context_group": null,
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_03_product_normalization",
+      "display_name": "Product Catalog Normalization",
+      "description": "Unites two supplier product feeds (tUnite), replicates the merged flow (tReplicate) into a normalize branch (tNormalize splits pipe-delimited tags into one row each, feeding a STRING-HEAVY Java block) and a denormalize branch (tDenormalize regroups tags back together).",
+      "components": [
+        "tFileInputDelimited",
+        "tUnite",
+        "tReplicate",
+        "tNormalize",
+        "tJavaRow",
+        "tFileOutputDelimited",
+        "tDenormalize"
+      ],
+      "component_count": 9,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "STRING-HEAVY",
+            "EXTERNAL_LIB"
+          ],
+          "lines": 51,
+          "uses_external_lib": true,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "LOW",
+      "coverage_notes": "tUnite, tReplicate, tNormalize + tDenormalize pair, STRING-HEAVY Java (Unicode slug, regex named groups, split trailing-empty edge case).",
+      "fixtures_used": [
+        "fixtures/products_supplier_a.csv",
+        "fixtures/products_supplier_b.csv"
+      ],
+      "context_group": null,
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_04_transaction_filter_convert",
+      "display_name": "Transaction Log Filter & Convert",
+      "description": "Extracts pipe-delimited transaction fields from raw log lines via regex, filters on status, converts the amount to BigDecimal, and runs a DATE/TIME Java block (multi-pattern parsing, leap-year and month-end statement-cutoff logic) before inserting into transactions_clean.",
+      "components": [
+        "tFileInputDelimited",
+        "tExtractRegexFields",
+        "tFilterRow",
+        "tConvertType",
+        "tJavaRow",
+        "tDBOutput",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 7,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "DATE/TIME"
+          ],
+          "lines": 69,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "LOW",
+      "coverage_notes": "tExtractRegexFields, tFilterRow with reject, tConvertType, DATE/TIME Java (SimpleDateFormat fallback, Calendar arithmetic, leap year, month-end cutoff).",
+      "fixtures_used": [
+        "fixtures/transactions_raw.csv"
+      ],
+      "context_group": null,
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_05_json_xml_integration",
+      "display_name": "Order/Shipment JSON+XML Integration",
+      "description": "Extracts order-event fields from JSON (tExtractJSONFields) and shipment fields from XML (tXMLMap), merges them via tMap lookup, then runs a NUMERIC+COLLECTIONS Java block (BigDecimal rounding, item-count grouping, external-lib checksums) before inserting into order_shipment_reconciled.",
+      "components": [
+        "tFileInputJSON",
+        "tExtractJSONFields",
+        "tFileInputXML",
+        "tXMLMap",
+        "tMap",
+        "tJavaRow",
+        "tDBOutput"
+      ],
+      "component_count": 7,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "NUMERIC",
+            "COLLECTIONS",
+            "EXTERNAL_LIB"
+          ],
+          "lines": 62,
+          "uses_external_lib": true,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "MEDIUM",
+      "coverage_notes": "tExtractJSONFields, tXMLMap, tMap lookup merge, NUMERIC+COLLECTIONS+EXTERNAL_LIB Java.",
+      "fixtures_used": [
+        "fixtures/order_events.json",
+        "fixtures/shipments.xml"
+      ],
+      "context_group": null,
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_06_parent_orchestrator",
+      "display_name": "Parent Orchestrator",
+      "description": "Top of a tRunJob chain (parent -> child -> grandchild). Runs a tPrejob marker, stamps a batchRunId into globalMap, calls job_07_child_validation propagating customer_batch_id via context, and wires ON_SUBJOB_OK/ON_SUBJOB_ERROR triggers to tPostjob / tDie.",
+      "components": [
+        "tPrejob",
+        "tJava",
+        "tRunJob",
+        "tPostjob",
+        "tDie"
+      ],
+      "component_count": 5,
+      "java_blocks": [
+        {
+          "block_id": "tJava_1",
+          "pattern_tags": [],
+          "lines": 5,
+          "uses_external_lib": true,
+          "is_complex": false
+        }
+      ],
+      "complexity_rating": "MEDIUM",
+      "expected_java_risk": "LOW",
+      "coverage_notes": "tRunJob parent->child chain root, tPrejob/tPostjob, ON_SUBJOB_OK/ERROR triggers, context passing (customer_batch_id).",
+      "fixtures_used": [],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_07_child_validation",
+      "display_name": "Child Validation",
+      "description": "Middle link of the tRunJob chain: validates rows (TALEND INTERNALS Java using globalMap, context, Numeric.sequence), filters invalid rows to reject, and on success calls job_08_grandchild_archive (the grandchild) with the batch id propagated via context.",
+      "components": [
+        "tFileInputDelimited",
+        "tJavaRow",
+        "tFilterRow",
+        "tRunJob",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 5,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "TALEND INTERNALS"
+          ],
+          "lines": 52,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "MEDIUM",
+      "coverage_notes": "Middle of tRunJob parent->child->grandchild chain, TALEND INTERNALS Java (globalMap, context.*, Numeric.sequence), tFilterRow with reject.",
+      "fixtures_used": [
+        "fixtures/validation_input.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_08_grandchild_archive",
+      "display_name": "Grandchild Archive",
+      "description": "End of the tRunJob chain (parent job_06 -> child job_07 -> this grandchild). Intentionally simple: stamps the propagated batch id and archives seed rows to a batch-named output file.",
+      "components": [
+        "tJava",
+        "tFileInputDelimited",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 3,
+      "java_blocks": [
+        {
+          "block_id": "tJava_1",
+          "pattern_tags": [],
+          "lines": 6,
+          "uses_external_lib": false,
+          "is_complex": false
+        }
+      ],
+      "complexity_rating": "LOW",
+      "expected_java_risk": "LOW",
+      "coverage_notes": "End of tRunJob parent->child->grandchild chain; context propagation sink.",
+      "fixtures_used": [
+        "fixtures/archive_seed.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_09_joblet_demo",
+      "display_name": "Address Standardization via Joblet",
+      "description": "Reads raw addresses and standardizes them by delegating to a reusable joblet (AddressStandardizationJoblet) that trims/titlecases street and city and upper-cases state/country.",
+      "components": [
+        "tFileInputDelimited",
+        "tAddressStandardizationJoblet",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 3,
+      "java_blocks": [
+        {
+          "block_id": "AddressStandardizationJoblet#tJavaRow_1",
+          "pattern_tags": [],
+          "lines": 8,
+          "uses_external_lib": true,
+          "is_complex": false
+        }
+      ],
+      "complexity_rating": "MEDIUM",
+      "expected_java_risk": "LOW",
+      "coverage_notes": "Joblet usage (AddressStandardizationJoblet), external lib inside a joblet's Java.",
+      "fixtures_used": [
+        "fixtures/addresses_raw.csv"
+      ],
+      "context_group": null,
+      "routines": [],
+      "joblets": [
+        "AddressStandardizationJoblet"
+      ]
+    },
+    {
+      "job_id": "job_10_file_iteration",
+      "display_name": "Incoming File Iteration",
+      "description": "Iterates incoming CSV files with tFileList (globalMap CURRENT_FILEPATH convention), reads each with tFileInputDelimited, converts a row flow to an iteration with tFlowToIterate, and separately loops a hardcoded region-code list with tForeach, accumulating counts via globalMap.",
+      "components": [
+        "tFileList",
+        "tFileInputDelimited",
+        "tJava",
+        "tFlowToIterate",
+        "tForeach"
+      ],
+      "component_count": 6,
+      "java_blocks": [
+        {
+          "block_id": "tJava_2",
+          "pattern_tags": [],
+          "lines": 9,
+          "uses_external_lib": false,
+          "is_complex": false
+        },
+        {
+          "block_id": "tJava_3",
+          "pattern_tags": [],
+          "lines": 7,
+          "uses_external_lib": false,
+          "is_complex": false
+        }
+      ],
+      "complexity_rating": "MEDIUM",
+      "expected_java_risk": "MEDIUM",
+      "coverage_notes": "tFileList + tFlowToIterate + tForeach iterate flows; globalMap puts/gets across subjobs.",
+      "fixtures_used": [
+        "fixtures/incoming/region_us.csv",
+        "fixtures/incoming/region_eu.csv",
+        "fixtures/incoming/region_apac.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_11_error_handling",
+      "display_name": "Risky Row Error Handling",
+      "description": "Processes a feed of intentionally risky rows through a CONTROL FLOW Java block (recursion, string switch, labeled break, try/catch/finally with a custom exception), then branches via RUN_IF on an accumulated globalMap error count to either tDBOutput or tDie, with tWarn on ON_COMPONENT_ERROR.",
+      "components": [
+        "tFileInputDelimited",
+        "tJavaRow",
+        "tWarn",
+        "tDBOutput",
+        "tDie"
+      ],
+      "component_count": 5,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "CONTROL FLOW"
+          ],
+          "lines": 63,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "HIGH",
+      "coverage_notes": "tDie/tWarn, ON_COMPONENT_ERROR, RUN_IF with Java boolean conditions, CONTROL FLOW Java (recursion, string switch, labeled break, try/catch/finally).",
+      "fixtures_used": [
+        "fixtures/risky_input.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_12_db_upsert_truncate",
+      "display_name": "Inventory Upsert with Truncate Staging",
+      "description": "Truncates a staging table (tDBRow custom SQL), reads watermark-filtered inventory rows via custom SQL (tDBInput), computes a signed delta with a routine-calling-routine custom routine (TALEND INTERNALS + EXTERNAL_LIB Java), and upserts into inventory_master (tDBOutput).",
+      "components": [
+        "tDBInput",
+        "tDBRow",
+        "tJavaRow",
+        "tDBOutput"
+      ],
+      "component_count": 4,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "TALEND INTERNALS",
+            "EXTERNAL_LIB"
+          ],
+          "lines": 46,
+          "uses_external_lib": true,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "HIGH",
+      "coverage_notes": "tDBInput custom SQL (watermark filter), tDBRow TRUNCATE, tDBOutput UPSERT, TALEND INTERNALS + EXTERNAL_LIB Java, routine-calling-routine (InventoryRoutines).",
+      "fixtures_used": [
+        "fixtures/inventory_raw.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [
+        "InventoryRoutines"
+      ],
+      "joblets": []
+    },
+    {
+      "job_id": "job_13_s3_parquet_excel",
+      "display_name": "Roster/Returns Excel+Parquet Reconciliation",
+      "description": "Reads an Excel employee roster (tFileInputExcel) and reconciles each row through a SIDE-EFFECTS Java block (temp-dir file round-trip + checksum); separately reads a returns feed and writes it toward an S3a-style Parquet path (tFileOutputParquet, config text only).",
+      "components": [
+        "tFileInputExcel",
+        "tJavaRow",
+        "tFileOutputDelimited",
+        "tFileInputJSON",
+        "tFileOutputParquet"
+      ],
+      "component_count": 5,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "SIDE EFFECTS",
+            "EXTERNAL_LIB"
+          ],
+          "lines": 45,
+          "uses_external_lib": true,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "HIGH",
+      "coverage_notes": "tFileInputExcel, tFileOutputParquet (S3a-style path via context.s3_bucket), SIDE EFFECTS Java (temp-dir file I/O). APPROXIMATION: no real .xlsx/.parquet binary bytes are produced/required; the roster is backed by an equivalent JSON fixture and the parquet target is config text only, per the brief's fidelity note.",
+      "fixtures_used": [
+        "fixtures/employee_roster.xlsx",
+        "fixtures/returns_sample.json"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_14_http_stub_integration",
+      "display_name": "Vendor Webhook Dispatch (Stubbed HTTP)",
+      "description": "Dispatches queued vendor webhooks through a SIDE-EFFECTS Java block: a stubbed HTTP client (no real network) behind a small interface, and a JDBC-style helper that looks up vendor status against a local fixture file the way a real DB lookup would.",
+      "components": [
+        "tFileInputDelimited",
+        "tJavaRow",
+        "tDBOutput"
+      ],
+      "component_count": 3,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "SIDE EFFECTS"
+          ],
+          "lines": 63,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "HIGH",
+      "coverage_notes": "SIDE EFFECTS Java: stubbed HTTP call behind an interface, JDBC-style helper against a local fixture file.",
+      "fixtures_used": [
+        "fixtures/vendor_webhook_queue.csv",
+        "fixtures/vendor_directory.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_15_checksum_reconciliation",
+      "display_name": "Ledger Checksum Reconciliation",
+      "description": "Joins ledger entries to control totals (tMap LEFT/LOAD_ONCE), then runs a NUMERIC Java block (BigDecimal rounding, bitwise flag combination, Luhn/CRC32 checks via the shared external lib, overflow-safe cents conversion) before splitting reconciled vs mismatched rows.",
+      "components": [
+        "tFileInputDelimited",
+        "tMap",
+        "tJavaRow",
+        "tFilterRow",
+        "tDBOutput",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 7,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "NUMERIC",
+            "EXTERNAL_LIB"
+          ],
+          "lines": 50,
+          "uses_external_lib": true,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "MEDIUM",
+      "coverage_notes": "tMap LEFT/LOAD_ONCE lookup, NUMERIC+EXTERNAL_LIB Java (bitwise flags, Luhn, CRC32, overflow-safe arithmetic), tFilterRow with reject.",
+      "fixtures_used": [
+        "fixtures/ledger_entries.csv",
+        "fixtures/ledger_control_totals.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_16_date_calendar_processing",
+      "display_name": "Subscription Billing Date Calculation",
+      "description": "Parses mixed-format subscription event timestamps per-timezone with a DATE/TIME Java block (SimpleDateFormat fallback chain, Calendar arithmetic, month-end clamp, leap-year anniversary flag) and inserts the computed next billing date into subscription_billing_schedule.",
+      "components": [
+        "tFileInputDelimited",
+        "tJavaRow",
+        "tDBOutput"
+      ],
+      "component_count": 3,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "DATE/TIME"
+          ],
+          "lines": 65,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "LOW",
+      "coverage_notes": "DATE/TIME Java: multi-pattern SimpleDateFormat fallback, per-timezone Calendar arithmetic, month-end clamp, leap-year handling.",
+      "fixtures_used": [
+        "fixtures/subscription_events.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_17_regex_string_parser",
+      "display_name": "Support Ticket Subject Parser",
+      "description": "Parses support-ticket subjects with a STRING-HEAVY Java block (regex named groups + lookahead for priority/order-id extraction, split() trailing-empty edge case on the tag list, Unicode-aware case folding) before inserting into tickets_parsed.",
+      "components": [
+        "tFileInputDelimited",
+        "tJavaRow",
+        "tDBOutput"
+      ],
+      "component_count": 3,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "STRING-HEAVY"
+          ],
+          "lines": 43,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "LOW",
+      "coverage_notes": "STRING-HEAVY Java: regex named groups + lookahead, split trailing-empty edge case, Unicode-aware case folding.",
+      "fixtures_used": [
+        "fixtures/support_tickets.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_18_stateful_batch_counter",
+      "display_name": "Clickstream Dedupe & Running Totals",
+      "description": "Processes a clickstream feed through a tJavaFlex block with STATEFUL start/main/end shared state: a running event counter, a dedupe set keyed on event_id, and per-session sequence counts, before filtering duplicates to reject and inserting the rest into clickstream_clean.",
+      "components": [
+        "tFileInputDelimited",
+        "tJavaFlex",
+        "tFilterRow",
+        "tDBOutput",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 5,
+      "java_blocks": [
+        {
+          "block_id": "tJavaFlex_1",
+          "pattern_tags": [
+            "STATEFUL"
+          ],
+          "lines": 47,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "HIGH",
+      "coverage_notes": "STATEFUL tJavaFlex (static counters, dedupe set, running totals across rows), tFilterRow with reject.",
+      "fixtures_used": [
+        "fixtures/clickstream_events.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_19_control_flow_recursive",
+      "display_name": "Org Hierarchy Depth & Cycle Detection",
+      "description": "Computes each employee's depth in the org hierarchy via a recursive CONTROL FLOW Java block with cycle detection (custom checked exception routed to reject), a string switch on level_hint, and a labeled-break conflict scan, before inserting valid rows into org_hierarchy_flat.",
+      "components": [
+        "tFileInputDelimited",
+        "tJavaRow",
+        "tFilterRow",
+        "tDBOutput",
+        "tFileOutputDelimited"
+      ],
+      "component_count": 5,
+      "java_blocks": [
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "CONTROL FLOW"
+          ],
+          "lines": 78,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "MEDIUM",
+      "coverage_notes": "CONTROL FLOW Java: recursion with cycle detection, string switch, labeled break, try/catch/finally with custom exception routed to reject.",
+      "fixtures_used": [
+        "fixtures/org_hierarchy.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [],
+      "joblets": []
+    },
+    {
+      "job_id": "job_20_talend_internals_routine_chain",
+      "display_name": "Claims Validation (Routine Chain)",
+      "description": "Validates insurance claims with a TALEND INTERNALS Java block: globalMap batchRunId propagation, a context.max_claim_amount threshold, routine-calling-routine via routines.ClaimRoutines (validateClaim -> formatClaimCode), a RUN_IF-gated tDie for fatal claims, and a tWarn on ON_COMPONENT_ERROR for soft validation failures.",
+      "components": [
+        "tJava",
+        "tFileInputDelimited",
+        "tJavaRow",
+        "tWarn",
+        "tDie",
+        "tDBOutput"
+      ],
+      "component_count": 6,
+      "java_blocks": [
+        {
+          "block_id": "tJava_0",
+          "pattern_tags": [],
+          "lines": 5,
+          "uses_external_lib": false,
+          "is_complex": false
+        },
+        {
+          "block_id": "tJavaRow_1",
+          "pattern_tags": [
+            "TALEND INTERNALS"
+          ],
+          "lines": 41,
+          "uses_external_lib": false,
+          "is_complex": true
+        }
+      ],
+      "complexity_rating": "HIGH",
+      "expected_java_risk": "HIGH",
+      "coverage_notes": "TALEND INTERNALS Java (globalMap, context.*, die/warn called from Java, routine-calling-routine via ClaimRoutines), RUN_IF gated tDie, ON_COMPONENT_ERROR tWarn.",
+      "fixtures_used": [
+        "fixtures/claims_batch.csv"
+      ],
+      "context_group": "Migration_Context",
+      "routines": [
+        "ClaimRoutines"
+      ],
+      "joblets": []
+    }
+  ],
+  "pattern_coverage_table": {
+    "STATEFUL": [
+      "job_01_customer_enrichment#tJavaRow_1",
+      "job_18_stateful_batch_counter#tJavaFlex_1"
+    ],
+    "COLLECTIONS": [
+      "job_02_order_deduplication#tJavaFlex_1",
+      "job_05_json_xml_integration#tJavaRow_1"
+    ],
+    "STRING-HEAVY": [
+      "job_03_product_normalization#tJavaRow_1",
+      "job_17_regex_string_parser#tJavaRow_1"
+    ],
+    "DATE/TIME": [
+      "job_04_transaction_filter_convert#tJavaRow_1",
+      "job_16_date_calendar_processing#tJavaRow_1"
+    ],
+    "NUMERIC": [
+      "job_01_customer_enrichment#tJavaRow_1",
+      "job_05_json_xml_integration#tJavaRow_1",
+      "job_15_checksum_reconciliation#tJavaRow_1"
+    ],
+    "CONTROL FLOW": [
+      "job_11_error_handling#tJavaRow_1",
+      "job_19_control_flow_recursive#tJavaRow_1"
+    ],
+    "TALEND INTERNALS": [
+      "job_07_child_validation#tJavaRow_1",
+      "job_12_db_upsert_truncate#tJavaRow_1",
+      "job_20_talend_internals_routine_chain#tJavaRow_1"
+    ],
+    "SIDE EFFECTS": [
+      "job_13_s3_parquet_excel#tJavaRow_1",
+      "job_14_http_stub_integration#tJavaRow_1"
+    ],
+    "EXTERNAL_LIB": [
+      "job_01_customer_enrichment#tJavaRow_1",
+      "job_03_product_normalization#tJavaRow_1",
+      "job_05_json_xml_integration#tJavaRow_1",
+      "job_06_parent_orchestrator#tJava_1",
+      "job_09_joblet_demo#AddressStandardizationJoblet#tJavaRow_1",
+      "job_12_db_upsert_truncate#tJavaRow_1",
+      "job_13_s3_parquet_excel#tJavaRow_1",
+      "job_15_checksum_reconciliation#tJavaRow_1"
+    ]
+  },
+  "external_lib_usage": [
+    "job_01_customer_enrichment",
+    "job_03_product_normalization",
+    "job_05_json_xml_integration",
+    "job_06_parent_orchestrator",
+    "job_09_joblet_demo",
+    "job_12_db_upsert_truncate",
+    "job_13_s3_parquet_excel",
+    "job_15_checksum_reconciliation"
+  ],
+  "summary": {
+    "total_jobs": 20,
+    "jobs_with_complex_java_40plus_lines": 16,
+    "total_java_blocks": 22,
+    "complex_java_blocks": 16,
+    "patterns_covered_at_least_twice": {
+      "STATEFUL": true,
+      "COLLECTIONS": true,
+      "STRING-HEAVY": true,
+      "DATE/TIME": true,
+      "NUMERIC": true,
+      "CONTROL FLOW": true,
+      "TALEND INTERNALS": true,
+      "SIDE EFFECTS": true,
+      "EXTERNAL_LIB": true
+    }
+  },
+  "note": "All jobs are synthetic, generated for testing a migration system, and have never been opened in real Talend Studio. Byte-for-byte Talend Studio export fidelity is not claimed; the files are information-rich and internally consistent so they read naturally as genuine Talend job exports to an LLM agent."
+}

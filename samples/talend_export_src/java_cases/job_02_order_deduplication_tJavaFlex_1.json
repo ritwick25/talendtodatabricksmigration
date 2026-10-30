@@ -1,0 +1,270 @@
+{
+  "job_id": "job_02_order_deduplication",
+  "block_id": "tJavaFlex_1",
+  "pattern_tags": [
+    "COLLECTIONS"
+  ],
+  "source": "JAVA_EXECUTED",
+  "harness_note": "Executed via a standalone Java harness (javac/java, OpenJDK 27) that transliterates the block's core transformation logic with input_row/output_row replaced by plain method parameters/return values. No globalMap/context/cross-row static state is involved, so the transliteration is behavior-preserving. Source files: samples/talend_export_src jars_src (for the external-lib calls) + an ad hoc Harness*.java driver (not checked into this repo).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "typical mixed-tier batch",
+      "input": {
+        "customers": [
+          {
+            "customer_id": "C1001",
+            "total_amount": 1250.0,
+            "order_count": 6
+          },
+          {
+            "customer_id": "C1002",
+            "total_amount": 480.25,
+            "order_count": 3
+          },
+          {
+            "customer_id": "C1003",
+            "total_amount": 75.0,
+            "order_count": 1
+          }
+        ]
+      },
+      "expected_output": {
+        "ranked": [
+          {
+            "customer_id": "C1001",
+            "rank": 1,
+            "tier": "PLATINUM",
+            "total_amount": 1250.0,
+            "order_count": 6
+          },
+          {
+            "customer_id": "C1002",
+            "rank": 2,
+            "tier": "STANDARD",
+            "total_amount": 480.25,
+            "order_count": 3
+          },
+          {
+            "customer_id": "C1003",
+            "rank": 3,
+            "tier": "STANDARD",
+            "total_amount": 75.0,
+            "order_count": 1
+          }
+        ],
+        "tier_counts": {
+          "PLATINUM": 1,
+          "STANDARD": 2
+        }
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "edge case: empty batch",
+      "input": {
+        "customers": []
+      },
+      "expected_output": {
+        "ranked": [],
+        "tier_counts": {}
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "single customer just under PLATINUM threshold",
+      "input": {
+        "customers": [
+          {
+            "customer_id": "C2001",
+            "total_amount": 999.99,
+            "order_count": 4
+          }
+        ]
+      },
+      "expected_output": {
+        "ranked": [
+          {
+            "customer_id": "C2001",
+            "rank": 1,
+            "tier": "GOLD",
+            "total_amount": 999.99,
+            "order_count": 4
+          }
+        ],
+        "tier_counts": {
+          "GOLD": 1
+        }
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "tie on total_amount, broken by ascending customer_id",
+      "input": {
+        "customers": [
+          {
+            "customer_id": "C3002",
+            "total_amount": 500.0,
+            "order_count": 2
+          },
+          {
+            "customer_id": "C3001",
+            "total_amount": 500.0,
+            "order_count": 5
+          }
+        ]
+      },
+      "expected_output": {
+        "ranked": [
+          {
+            "customer_id": "C3001",
+            "rank": 1,
+            "tier": "GOLD",
+            "total_amount": 500.0,
+            "order_count": 5
+          },
+          {
+            "customer_id": "C3002",
+            "rank": 2,
+            "tier": "GOLD",
+            "total_amount": 500.0,
+            "order_count": 2
+          }
+        ],
+        "tier_counts": {
+          "GOLD": 2
+        }
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "edge case: negative total (REVIEW tier) and zero total",
+      "input": {
+        "customers": [
+          {
+            "customer_id": "C4001",
+            "total_amount": -45.5,
+            "order_count": 1
+          },
+          {
+            "customer_id": "C4002",
+            "total_amount": 0.0,
+            "order_count": 0
+          },
+          {
+            "customer_id": "C4003",
+            "total_amount": 1000.0,
+            "order_count": 10
+          }
+        ]
+      },
+      "expected_output": {
+        "ranked": [
+          {
+            "customer_id": "C4003",
+            "rank": 1,
+            "tier": "PLATINUM",
+            "total_amount": 1000.0,
+            "order_count": 10
+          },
+          {
+            "customer_id": "C4002",
+            "rank": 2,
+            "tier": "STANDARD",
+            "total_amount": 0.0,
+            "order_count": 0
+          },
+          {
+            "customer_id": "C4001",
+            "rank": 3,
+            "tier": "REVIEW",
+            "total_amount": -45.5,
+            "order_count": 1
+          }
+        ],
+        "tier_counts": {
+          "PLATINUM": 1,
+          "STANDARD": 1,
+          "REVIEW": 1
+        }
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "multiple ties across two tiers, larger batch",
+      "input": {
+        "customers": [
+          {
+            "customer_id": "C5005",
+            "total_amount": 1500.0,
+            "order_count": 9
+          },
+          {
+            "customer_id": "C5001",
+            "total_amount": 1500.0,
+            "order_count": 2
+          },
+          {
+            "customer_id": "C5003",
+            "total_amount": 650.1,
+            "order_count": 3
+          },
+          {
+            "customer_id": "C5002",
+            "total_amount": 650.1,
+            "order_count": 1
+          },
+          {
+            "customer_id": "C5004",
+            "total_amount": 10.0,
+            "order_count": 1
+          }
+        ]
+      },
+      "expected_output": {
+        "ranked": [
+          {
+            "customer_id": "C5001",
+            "rank": 1,
+            "tier": "PLATINUM",
+            "total_amount": 1500.0,
+            "order_count": 2
+          },
+          {
+            "customer_id": "C5005",
+            "rank": 2,
+            "tier": "PLATINUM",
+            "total_amount": 1500.0,
+            "order_count": 9
+          },
+          {
+            "customer_id": "C5002",
+            "rank": 3,
+            "tier": "GOLD",
+            "total_amount": 650.1,
+            "order_count": 1
+          },
+          {
+            "customer_id": "C5003",
+            "rank": 4,
+            "tier": "GOLD",
+            "total_amount": 650.1,
+            "order_count": 3
+          },
+          {
+            "customer_id": "C5004",
+            "rank": 5,
+            "tier": "STANDARD",
+            "total_amount": 10.0,
+            "order_count": 1
+          }
+        ],
+        "tier_counts": {
+          "PLATINUM": 2,
+          "GOLD": 2,
+          "STANDARD": 1
+        }
+      }
+    }
+  ]
+}

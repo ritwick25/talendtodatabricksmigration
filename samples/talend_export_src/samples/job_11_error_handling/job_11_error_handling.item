@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Risky Row Error Handling" jobId="job_11_error_handling" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Processes a feed of intentionally risky rows through a CONTROL FLOW Java block (recursion, string switch, labeled break, try/catch/finally with a custom exception), then branches via RUN_IF on an accumulated globalMap error count to either tDBOutput or tDie, with tWarn on ON_COMPONENT_ERROR.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/risky_input.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="row_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="status_code" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="amount" type="id_BigDecimal" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- Pattern: CONTROL FLOW (recursion, string switch, labeled break,
+// try/catch/finally with a custom exception). DERIVED: throws/catches are routed through
+// globalMap "errorCount" which downstream RUN_IF connections key off of (Talend-coupled).
+
+if (errorCount == null) { errorCount = 0; }
+
+int level;
+switch (input_row.status_code == null ? "" : input_row.status_code) {
+    case "OK":      level = 0; break;
+    case "RETRY":   level = 1; break;
+    case "FAIL":    level = 2; break;
+    default:        level = 3; break;
+}
+
+// labeled-break demo: scan a small synthetic anomaly matrix derived from amount/level
+boolean anomaly = false;
+scan:
+for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++) {
+        if (i == level && j == (input_row.amount != null && input_row.amount.signum() < 0 ? 1 : 0)) {
+            anomaly = true;
+            break scan;
+        }
+    }
+}
+
+try {
+    int attempts = retryWithBackoff(level, 0);
+    output_row.row_id = input_row.row_id;
+    output_row.level = level;
+    output_row.anomaly = anomaly;
+    output_row.attempts = attempts;
+    output_row.error_message = "";
+} catch (RowValidationException e) {
+    errorCount++;
+    globalMap.put("errorCount", errorCount);
+    output_row.row_id = input_row.row_id;
+    output_row.level = level;
+    output_row.anomaly = anomaly;
+    output_row.attempts = -1;
+    output_row.error_message = e.getMessage();
+} finally {
+    globalMap.put("job11_lastRowId", input_row.row_id);
+}
+
+/** Custom checked exception used to route unrecoverable rows away from the main flow. */
+static class RowValidationException extends Exception {
+    RowValidationException(String msg) { super(msg); }
+}
+
+/**
+ * Recursive retry simulator: FAIL rows (level 2) recurse up to 3 times accumulating
+ * attempts, then throw; everything else returns immediately.
+ */
+private int retryWithBackoff(int level, int attempt) throws RowValidationException {
+    if (level != 2) {
+        return attempt;
+    }
+    if (attempt >= 3) {
+        throw new RowValidationException("exceeded max retries at level=" + level);
+    }
+    return retryWithBackoff(level, attempt + 1);
+}
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="row_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="level" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="anomaly" type="id_Boolean" length="" precision="" nullable="true" key="false"/>
+        <column name="attempts" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="error_message" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tWarn" componentVersion="0.102" posX="320" posY="260" uniqueName="tWarn_1">
+      <elementParameter name="MESSAGE" field="TEXT" value="&quot;tJavaRow_1 raised a component error for row &quot; + (String)globalMap.get(&quot;job11_lastRowId&quot;)"/>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="560" posY="40" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="risky_rows_processed"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+    <node componentName="tDie" componentVersion="0.102" posX="560" posY="200" uniqueName="tDie_1">
+      <elementParameter name="MESSAGE" field="TEXT" value="&quot;job_11_error_handling: errorCount exceeded threshold: &quot; + globalMap.get(&quot;errorCount&quot;)"/>
+      <elementParameter name="ERROR_CODE" field="TEXT" value="3"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tWarn_1" connectorName="ON_COMPONENT_ERROR"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="RUN_IF" condition="((Integer)globalMap.get(&quot;errorCount&quot;)) &lt; 5"/>
+    <connection source="tJavaRow_1" target="tDie_1" connectorName="RUN_IF" condition="((Integer)globalMap.get(&quot;errorCount&quot;)) &gt;= 5"/>
+  </connections>
+</talendJob>

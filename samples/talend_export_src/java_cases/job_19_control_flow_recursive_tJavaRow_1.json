@@ -1,0 +1,136 @@
+{
+  "job_id": "job_19_control_flow_recursive",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "CONTROL FLOW"
+  ],
+  "source": "JAVA_EXECUTED",
+  "harness_note": "Executed via a standalone Java harness (javac/java, OpenJDK 27) that transliterates the block's core transformation logic with input_row/output_row replaced by plain method parameters/return values. No globalMap/context/cross-row static state is involved, so the transliteration is behavior-preserving. Source files: samples/talend_export_src jars_src (for the external-lib calls) + an ad hoc Harness*.java driver (not checked into this repo).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "4-deep chain, IC level",
+      "input": {
+        "employee_id": "E103",
+        "manager_of": {
+          "E100": "",
+          "E101": "E100",
+          "E102": "E101",
+          "E103": "E102"
+        },
+        "level_hint": "IC"
+      },
+      "expected_output": {
+        "level_from_hint": 4,
+        "first_conflict": "NONE",
+        "depth": 3,
+        "error": "",
+        "processed": true
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "root employee, depth 0",
+      "input": {
+        "employee_id": "E100",
+        "manager_of": {
+          "E100": "",
+          "E101": "E100",
+          "E102": "E101",
+          "E103": "E102"
+        },
+        "level_hint": "EXEC"
+      },
+      "expected_output": {
+        "level_from_hint": 1,
+        "first_conflict": "NONE",
+        "depth": 0,
+        "error": "",
+        "processed": true
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: cyclic hierarchy throws",
+      "input": {
+        "employee_id": "E201",
+        "manager_of": {
+          "E200": "E202",
+          "E201": "E200",
+          "E202": "E201"
+        },
+        "level_hint": "MGR"
+      },
+      "expected_output": {
+        "level_from_hint": 3,
+        "first_conflict": "dept0-level1",
+        "depth": -1,
+        "error": "cycle detected at E201",
+        "processed": true
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "edge case: employee not in map, unknown hint -> default level",
+      "input": {
+        "employee_id": "E999",
+        "manager_of": {
+          "E100": "",
+          "E101": "E100",
+          "E102": "E101",
+          "E103": "E102"
+        },
+        "level_hint": "UNKNOWN_HINT"
+      },
+      "expected_output": {
+        "level_from_hint": 5,
+        "first_conflict": "NONE",
+        "depth": 0,
+        "error": "",
+        "processed": true
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "mid-chain employee",
+      "input": {
+        "employee_id": "E102",
+        "manager_of": {
+          "E100": "",
+          "E101": "E100",
+          "E102": "E101",
+          "E103": "E102"
+        },
+        "level_hint": "DIR"
+      },
+      "expected_output": {
+        "level_from_hint": 2,
+        "first_conflict": "dept0-level1",
+        "depth": 2,
+        "error": "",
+        "processed": true
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "edge case: empty level_hint -> default level",
+      "input": {
+        "employee_id": "E100",
+        "manager_of": {
+          "E100": "",
+          "E101": "E100",
+          "E102": "E101",
+          "E103": "E102"
+        },
+        "level_hint": ""
+      },
+      "expected_output": {
+        "level_from_hint": 5,
+        "first_conflict": "NONE",
+        "depth": 0,
+        "error": "",
+        "processed": true
+      }
+    }
+  ]
+}

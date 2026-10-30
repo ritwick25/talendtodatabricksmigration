@@ -1,0 +1,16 @@
+[
+  {
+    "return_id": "RET1",
+    "order_id": "ORD1001",
+    "reason": "damaged",
+    "amount": 19.99,
+    "returned_at": "2024-03-01"
+  },
+  {
+    "return_id": "RET2",
+    "order_id": "ORD1002",
+    "reason": "wrong_item",
+    "amount": 10.0,
+    "returned_at": "2024-03-02"
+  }
+]

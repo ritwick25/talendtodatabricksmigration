@@ -1,0 +1,120 @@
+{
+  "job_id": "job_03_product_normalization",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "STRING-HEAVY",
+    "EXTERNAL_LIB"
+  ],
+  "source": "JAVA_EXECUTED",
+  "harness_note": "Executed via a standalone Java harness (javac/java, OpenJDK 27) that transliterates the block's core transformation logic with input_row/output_row replaced by plain method parameters/return values. No globalMap/context/cross-row static state is involved, so the transliteration is behavior-preserving. Source files: samples/talend_export_src jars_src (for the external-lib calls) + an ad hoc Harness*.java driver (not checked into this repo).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "accented name, trailing-empty tags",
+      "input": {
+        "name": "Caf\u00e9 D\u00e9luxe Blender",
+        "sku_raw": "SKU-2024-00123-A",
+        "tags_original": "kitchen,appliance,,"
+      },
+      "expected_output": {
+        "slug": "cafe-deluxe-blender",
+        "display_label": "Caf\u00e9 D\u00e9luxe Blender (SKU-2024-00123-A)",
+        "sku_year": "2024",
+        "sku_seq": "00123",
+        "sku_rev": "A",
+        "tags_trimming_count": "2",
+        "tags_preserving_count": "4"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "simple case, single tag",
+      "input": {
+        "name": "Plain Toaster",
+        "sku_raw": "SKU-2023-00042-B",
+        "tags_original": "kitchen"
+      },
+      "expected_output": {
+        "slug": "plain-toaster",
+        "display_label": "Plain Toaster (SKU-2023-00042-B)",
+        "sku_year": "2023",
+        "sku_seq": "00042",
+        "sku_rev": "B",
+        "tags_trimming_count": "1",
+        "tags_preserving_count": "1"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: irregular whitespace, empty tags",
+      "input": {
+        "name": "  Multi   Space   Name  ",
+        "sku_raw": "SKU-2024-99999-Z",
+        "tags_original": ""
+      },
+      "expected_output": {
+        "slug": "multi-space-name",
+        "display_label": "Multi Space Name (SKU-2024-99999-Z)",
+        "sku_year": "2024",
+        "sku_seq": "99999",
+        "sku_rev": "Z",
+        "tags_trimming_count": "1",
+        "tags_preserving_count": "1"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "edge case: SKU regex does not match",
+      "input": {
+        "name": "R\u00e9sum\u00e9 Holder D\u00e9j\u00e0-vu",
+        "sku_raw": "NOTASKU-FORMAT",
+        "tags_original": "office,,storage,"
+      },
+      "expected_output": {
+        "slug": "resume-holder-deja-vu",
+        "display_label": "R\u00e9sum\u00e9 Holder D\u00e9j\u00e0-Vu (NOTASKU-FORMAT)",
+        "sku_year": "",
+        "sku_seq": "",
+        "sku_rev": "",
+        "tags_trimming_count": "3",
+        "tags_preserving_count": "4"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "multiple accents, several tags with trailing comma",
+      "input": {
+        "name": "Na\u00efve Caf\u00e9 Cr\u00e8me Set",
+        "sku_raw": "SKU-2022-00007-C",
+        "tags_original": "a,b,c,d,e,"
+      },
+      "expected_output": {
+        "slug": "naive-cafe-creme-set",
+        "display_label": "Na\u00efve Caf\u00e9 Cr\u00e8me Set (SKU-2022-00007-C)",
+        "sku_year": "2022",
+        "sku_seq": "00007",
+        "sku_rev": "C",
+        "tags_trimming_count": "5",
+        "tags_preserving_count": "6"
+      }
+    },
+    {
+      "case_id": 6,
+      "description": "edge case: empty name, lone delimiter",
+      "input": {
+        "name": "",
+        "sku_raw": "SKU-2024-00001-A",
+        "tags_original": ","
+      },
+      "expected_output": {
+        "slug": "",
+        "display_label": " (SKU-2024-00001-A)",
+        "sku_year": "2024",
+        "sku_seq": "00001",
+        "sku_rev": "A",
+        "tags_trimming_count": "0",
+        "tags_preserving_count": "2"
+      }
+    }
+  ]
+}

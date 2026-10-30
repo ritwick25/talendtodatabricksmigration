@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<talendJob name="Support Ticket Subject Parser" jobId="job_17_regex_string_parser" synthetic="true" neverOpenedInRealTalendStudio="true">
+  <description>Parses support-ticket subjects with a STRING-HEAVY Java block (regex named groups + lookahead for priority/order-id extraction, split() trailing-empty edge case on the tag list, Unicode-aware case folding) before inserting into tickets_parsed.</description>
+  <contextRef group="Migration_Context"/>
+  <nodes>
+    <node componentName="tFileInputDelimited" componentVersion="0.102" posX="80" posY="80" uniqueName="tFileInputDelimited_1">
+      <elementParameter name="FILENAME" field="TEXT" value="(String)context.source_dir + &quot;/support_tickets.csv&quot;"/>
+      <elementParameter name="HEADER" field="TEXT" value="1"/>
+      <metadata connector="FLOW">
+        <column name="ticket_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="raw_subject" type="id_String" length="200" precision="" nullable="true" key="false"/>
+        <column name="tag_string" type="id_String" length="100" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tJavaRow" componentVersion="0.102" posX="320" posY="80" uniqueName="tJavaRow_1">
+      <elementParameter name="CODE" field="CODE"><![CDATA[
+// tJavaRow_1 -- Pattern: STRING-HEAVY (regex with named groups + lookahead, StringBuilder,
+// String.format, split() trailing-empty edge case, Unicode-aware case folding). Pure given its
+// row fields -- executed standalone in java_cases/job_17_regex_string_parser_tJavaRow_1.json
+// (JAVA_EXECUTED).
+
+String subject = input_row.raw_subject == null ? "" : input_row.raw_subject;
+
+java.util.regex.Matcher pm = PRIORITY_PATTERN.matcher(subject);
+String priority = pm.find() ? pm.group("priority") : "NORMAL";
+
+java.util.regex.Matcher om = ORDER_PATTERN.matcher(subject);
+String orderId = om.find() ? om.group("orderid") : "";
+
+String cleaned = subject.replaceFirst("^\\[[A-Z]+\\]\\s*", "").replaceAll("\\s+", " ").trim();
+String ticketCode = (cleaned.length() >= 3 ? cleaned.substring(0, 3) : cleaned).toUpperCase(java.util.Locale.ROOT);
+
+String ts = input_row.tag_string == null ? "" : input_row.tag_string;
+String[] trimmed = ts.split(",");
+String[] preserved = ts.split(",", -1);
+StringBuilder sb = new StringBuilder();
+int kept = 0;
+for (String t : preserved) {
+    String norm = t.trim();
+    if (!norm.isEmpty()) {
+        if (kept++ > 0) sb.append("; ");
+        sb.append(norm);
+    }
+}
+
+output_row.ticket_id = input_row.ticket_id;
+output_row.priority = priority;
+output_row.order_id = orderId;
+output_row.subject_clean = cleaned;
+output_row.ticket_code = ticketCode;
+output_row.tags_trimmed_split_len = trimmed.length;
+output_row.tags_preserved_split_len = preserved.length;
+output_row.tags_normalized = sb.toString();
+
+// priority tag only matched when followed by further content (lookahead demonstration)
+private static final java.util.regex.Pattern PRIORITY_PATTERN =
+        java.util.regex.Pattern.compile("^\\[(?<priority>[A-Z]+)\\](?=\\s*\\S)");
+private static final java.util.regex.Pattern ORDER_PATTERN =
+        java.util.regex.Pattern.compile("Order#(?<orderid>\\d+)");
+]]></elementParameter>
+      <metadata connector="FLOW">
+        <column name="ticket_id" type="id_String" length="" precision="" nullable="true" key="true"/>
+        <column name="priority" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="order_id" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="subject_clean" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="ticket_code" type="id_String" length="" precision="" nullable="true" key="false"/>
+        <column name="tags_trimmed_split_len" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="tags_preserved_split_len" type="id_Integer" length="" precision="" nullable="true" key="false"/>
+        <column name="tags_normalized" type="id_String" length="" precision="" nullable="true" key="false"/>
+      </metadata>
+    </node>
+    <node componentName="tDBOutput" componentVersion="0.102" posX="560" posY="80" uniqueName="tDBOutput_1">
+      <elementParameter name="TABLE" field="TEXT" value="tickets_parsed"/>
+      <elementParameter name="ACTION" field="TEXT" value="INSERT"/>
+      <elementParameter name="JDBC_URL" field="TEXT" value="(String)context.db_url"/>
+      <elementParameter name="SCHEMA" field="TEXT" value="(String)context.target_schema"/>
+    </node>
+  </nodes>
+  <connections>
+    <connection source="tFileInputDelimited_1" target="tJavaRow_1" connectorName="FLOW"/>
+    <connection source="tJavaRow_1" target="tDBOutput_1" connectorName="FLOW"/>
+  </connections>
+</talendJob>

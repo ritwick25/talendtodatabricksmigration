@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Shipments>
+  <Shipment>
+    <ShipmentId>SHP1</ShipmentId>
+    <OrderId>ORD1001</OrderId>
+    <Carrier>FastFreight</Carrier>
+    <WeightKg>4.2</WeightKg>
+  </Shipment>
+  <Shipment>
+    <ShipmentId>SHP2</ShipmentId>
+    <OrderId>ORD1002</OrderId>
+    <Carrier>OceanLine</Carrier>
+    <WeightKg>250.7</WeightKg>
+  </Shipment>
+</Shipments>

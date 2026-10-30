@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<contextGroup name="Migration_Context" synthetic="true">
+  <contextParameters>
+    <contextParameter name="source_dir" type="String" comment="Root directory for file-based sources"/>
+    <contextParameter name="db_url" type="String" comment="Target JDBC URL (synthetic, never dialed)"/>
+    <contextParameter name="db_user" type="String" comment="Service account for DB components"/>
+    <contextParameter name="target_schema" type="String" comment="Target schema/catalog namespace, maps to talend_migration.samples in Databricks"/>
+    <contextParameter name="max_retries" type="Integer" comment="Max retry count for tRunJob / RUN_IF error branches"/>
+    <contextParameter name="watermark_ts" type="String" comment="Incremental-load watermark for tDBInput custom SQL"/>
+    <contextParameter name="s3_bucket" type="String" comment="Synthetic S3-style bucket root, config text only, no real S3 calls"/>
+    <contextParameter name="max_claim_amount" type="Integer" comment="Threshold used by RUN_IF / Java validation conditions"/>
+    <contextParameter name="batch_run_prefix" type="String" comment="Prefix used when generating batchRunId values"/>
+    <contextParameter name="customer_batch_id" type="String" comment="Batch id propagated parent-&gt;child-&gt;grandchild via tRunJob"/>
+  </contextParameters>
+  <contextParameterValues context="Dev">
+    <value name="source_dir" value="samples/talend_export_src/fixtures"/>
+    <value name="db_url" value="jdbc:postgresql://dev-db.internal:5432/migration"/>
+    <value name="db_user" value="migration_svc_dev"/>
+    <value name="target_schema" value="dev_samples"/>
+    <value name="max_retries" value="3"/>
+    <value name="watermark_ts" value="2024-01-01 00:00:00"/>
+    <value name="s3_bucket" value="s3a://sample-lake-dev/"/>
+    <value name="max_claim_amount" value="5000"/>
+    <value name="batch_run_prefix" value="DEV"/>
+    <value name="customer_batch_id" value="BATCH001"/>
+  </contextParameterValues>
+  <contextParameterValues context="Test">
+    <value name="source_dir" value="samples/talend_export_src/fixtures"/>
+    <value name="db_url" value="jdbc:postgresql://test-db.internal:5432/migration"/>
+    <value name="db_user" value="migration_svc_test"/>
+    <value name="target_schema" value="test_samples"/>
+    <value name="max_retries" value="3"/>
+    <value name="watermark_ts" value="2024-01-01 00:00:00"/>
+    <value name="s3_bucket" value="s3a://sample-lake-test/"/>
+    <value name="max_claim_amount" value="5000"/>
+    <value name="batch_run_prefix" value="TEST"/>
+    <value name="customer_batch_id" value="BATCH001"/>
+  </contextParameterValues>
+  <contextParameterValues context="Prod">
+    <value name="source_dir" value="samples/talend_export_src/fixtures"/>
+    <value name="db_url" value="jdbc:postgresql://prod-db.internal:5432/migration"/>
+    <value name="db_user" value="migration_svc_prod"/>
+    <value name="target_schema" value="samples"/>
+    <value name="max_retries" value="5"/>
+    <value name="watermark_ts" value="2024-06-01 00:00:00"/>
+    <value name="s3_bucket" value="s3a://sample-lake-prod/"/>
+    <value name="max_claim_amount" value="10000"/>
+    <value name="batch_run_prefix" value="PROD"/>
+    <value name="customer_batch_id" value="BATCH-PROD-001"/>
+  </contextParameterValues>
+</contextGroup>

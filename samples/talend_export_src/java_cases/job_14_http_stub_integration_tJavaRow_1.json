@@ -1,0 +1,98 @@
+{
+  "job_id": "job_14_http_stub_integration",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "SIDE EFFECTS"
+  ],
+  "source": "DERIVED",
+  "derivation_note": "DERIVED: FixtureJdbcHelper reads samples/talend_export_src/fixtures/vendor_directory.csv from disk per call (side effect), and HttpClientStub's deterministic-but-interface-shaped response still models an external call. Reasoned through directly against the fixture file contents (fixtures/vendor_directory.csv: V100 and V200 are active=true; V999 is absent).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "known active vendor, normal endpoint",
+      "input": {
+        "webhook_id": "WH1",
+        "vendor_id": "V100",
+        "endpoint_path": "/events/order-created",
+        "payload_json": "{\"order_id\":\"ORD1001\"}"
+      },
+      "expected_output": {
+        "webhook_id": "WH1",
+        "vendor_id": "V100",
+        "vendor_active": true,
+        "http_status": 200,
+        "http_ok": true
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "known active vendor, different endpoint",
+      "input": {
+        "webhook_id": "WH2",
+        "vendor_id": "V200",
+        "endpoint_path": "/events/order-shipped",
+        "payload_json": "{\"order_id\":\"ORD1002\"}"
+      },
+      "expected_output": {
+        "webhook_id": "WH2",
+        "vendor_id": "V200",
+        "vendor_active": true,
+        "http_status": 200,
+        "http_ok": true
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: vendor not present in fixture -> inactive, and endpoint is unknown",
+      "input": {
+        "webhook_id": "WH3",
+        "vendor_id": "V999",
+        "endpoint_path": "/events/unknown",
+        "payload_json": "{}"
+      },
+      "expected_output": {
+        "webhook_id": "WH3",
+        "vendor_id": "V999",
+        "vendor_active": false,
+        "http_status": 404,
+        "http_ok": false,
+        "_note": "path.startsWith('/events/unknown') -> 404 takes precedence over the empty-payload 422 check"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "edge case: empty JSON payload on a known endpoint",
+      "input": {
+        "webhook_id": "WH4",
+        "vendor_id": "V100",
+        "endpoint_path": "/events/order-created",
+        "payload_json": "{}"
+      },
+      "expected_output": {
+        "webhook_id": "WH4",
+        "vendor_id": "V100",
+        "vendor_active": true,
+        "http_status": 422,
+        "http_ok": false
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "edge case: null payload_json",
+      "input": {
+        "webhook_id": "WH5",
+        "vendor_id": "V200",
+        "endpoint_path": "/events/order-shipped",
+        "payload_json": null
+      },
+      "expected_output": {
+        "webhook_id": "WH5",
+        "vendor_id": "V200",
+        "vendor_active": true,
+        "http_status": 422,
+        "http_ok": false,
+        "_note": "jsonBody==null matches the empty-payload branch"
+      }
+    }
+  ]
+}

@@ -1,0 +1,93 @@
+{
+  "job_id": "job_13_s3_parquet_excel",
+  "block_id": "tJavaRow_1",
+  "pattern_tags": [
+    "SIDE EFFECTS",
+    "EXTERNAL_LIB"
+  ],
+  "source": "DERIVED",
+  "derivation_note": "DERIVED: writes/reads/deletes a real temp file per row (java.io.tmpdir), so the outcome depends on filesystem state, not just the row's field values. recon_round_trip_ok is reasoned to always be true in the happy path (the write+read is synchronous and the content is ASCII with no special characters), and the crc32 is reasoned by the same CRC32 algorithm ChecksumUtil.crc32Hex applies (identical to the one exercised and verified in jars_src).",
+  "cases": [
+    {
+      "case_id": 1,
+      "description": "typical roster row",
+      "input": {
+        "emp_id": "E100",
+        "dept": "Finance",
+        "salary": 88000
+      },
+      "expected_output": {
+        "emp_id": "E100",
+        "dept": "Finance",
+        "salary": 88000,
+        "recon_round_trip_ok": true,
+        "_note": "line='E100|Finance|88000'; recon_checksum = crc32Hex(that exact string)"
+      }
+    },
+    {
+      "case_id": 2,
+      "description": "different department",
+      "input": {
+        "emp_id": "E101",
+        "dept": "Finance",
+        "salary": 71000
+      },
+      "expected_output": {
+        "emp_id": "E101",
+        "dept": "Finance",
+        "salary": 71000,
+        "recon_round_trip_ok": true,
+        "_note": "line='E101|Finance|71000'"
+      }
+    },
+    {
+      "case_id": 3,
+      "description": "edge case: zero salary",
+      "input": {
+        "emp_id": "E999",
+        "dept": "Ops",
+        "salary": 0
+      },
+      "expected_output": {
+        "emp_id": "E999",
+        "dept": "Ops",
+        "salary": 0,
+        "recon_round_trip_ok": true,
+        "_note": "line='E999|Ops|0'; still round-trips fine, checksum differs from non-zero cases"
+      }
+    },
+    {
+      "case_id": 4,
+      "description": "edge case: IO failure writing the temp file (e.g. tmp dir not writable)",
+      "input": {
+        "emp_id": "E102",
+        "dept": "Ops",
+        "salary": 64000,
+        "simulate_io_error": true
+      },
+      "expected_output": {
+        "emp_id": "E102",
+        "dept": "Ops",
+        "salary": 64000,
+        "recon_round_trip_ok": false,
+        "_note": "catch(IOException) logs to System.err and leaves tmpFile unwritten/stale -> readWholeFile returns null or stale content -> line.equals(readBack) is false"
+      }
+    },
+    {
+      "case_id": 5,
+      "description": "two rows with the same emp_id processed back-to-back (overwrite semantics)",
+      "input": {
+        "emp_id": "E100",
+        "dept": "Finance",
+        "salary": 95000
+      },
+      "expected_output": {
+        "emp_id": "E100",
+        "dept": "Finance",
+        "salary": 95000,
+        "recon_round_trip_ok": true,
+        "_note": "tmpFile for E100 is overwritten with the new line before being read back, so round trip still succeeds with the new value"
+      }
+    }
+  ]
+}

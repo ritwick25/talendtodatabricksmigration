@@ -1,0 +1,189 @@
+{
+  "summary": {
+    "total_jobs_checked": 20,
+    "all_passed": true,
+    "failed_jobs": []
+  },
+  "jobs": [
+    {
+      "job_id": "job_01_customer_enrichment",
+      "item_path": "samples/job_01_customer_enrichment/job_01_customer_enrichment.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 7,
+      "errors": []
+    },
+    {
+      "job_id": "job_02_order_deduplication",
+      "item_path": "samples/job_02_order_deduplication/job_02_order_deduplication.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 9,
+      "errors": []
+    },
+    {
+      "job_id": "job_03_product_normalization",
+      "item_path": "samples/job_03_product_normalization/job_03_product_normalization.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 9,
+      "errors": []
+    },
+    {
+      "job_id": "job_04_transaction_filter_convert",
+      "item_path": "samples/job_04_transaction_filter_convert/job_04_transaction_filter_convert.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 7,
+      "errors": []
+    },
+    {
+      "job_id": "job_05_json_xml_integration",
+      "item_path": "samples/job_05_json_xml_integration/job_05_json_xml_integration.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 7,
+      "errors": []
+    },
+    {
+      "job_id": "job_06_parent_orchestrator",
+      "item_path": "samples/job_06_parent_orchestrator/job_06_parent_orchestrator.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 5,
+      "errors": []
+    },
+    {
+      "job_id": "job_07_child_validation",
+      "item_path": "samples/job_07_child_validation/job_07_child_validation.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 5,
+      "errors": []
+    },
+    {
+      "job_id": "job_08_grandchild_archive",
+      "item_path": "samples/job_08_grandchild_archive/job_08_grandchild_archive.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 3,
+      "errors": []
+    },
+    {
+      "job_id": "job_09_joblet_demo",
+      "item_path": "samples/job_09_joblet_demo/job_09_joblet_demo.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 3,
+      "errors": []
+    },
+    {
+      "job_id": "job_10_file_iteration",
+      "item_path": "samples/job_10_file_iteration/job_10_file_iteration.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 6,
+      "errors": []
+    },
+    {
+      "job_id": "job_11_error_handling",
+      "item_path": "samples/job_11_error_handling/job_11_error_handling.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 5,
+      "errors": []
+    },
+    {
+      "job_id": "job_12_db_upsert_truncate",
+      "item_path": "samples/job_12_db_upsert_truncate/job_12_db_upsert_truncate.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 4,
+      "errors": []
+    },
+    {
+      "job_id": "job_13_s3_parquet_excel",
+      "item_path": "samples/job_13_s3_parquet_excel/job_13_s3_parquet_excel.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 5,
+      "errors": []
+    },
+    {
+      "job_id": "job_14_http_stub_integration",
+      "item_path": "samples/job_14_http_stub_integration/job_14_http_stub_integration.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 3,
+      "errors": []
+    },
+    {
+      "job_id": "job_15_checksum_reconciliation",
+      "item_path": "samples/job_15_checksum_reconciliation/job_15_checksum_reconciliation.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 7,
+      "errors": []
+    },
+    {
+      "job_id": "job_16_date_calendar_processing",
+      "item_path": "samples/job_16_date_calendar_processing/job_16_date_calendar_processing.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 3,
+      "errors": []
+    },
+    {
+      "job_id": "job_17_regex_string_parser",
+      "item_path": "samples/job_17_regex_string_parser/job_17_regex_string_parser.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 3,
+      "errors": []
+    },
+    {
+      "job_id": "job_18_stateful_batch_counter",
+      "item_path": "samples/job_18_stateful_batch_counter/job_18_stateful_batch_counter.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 5,
+      "errors": []
+    },
+    {
+      "job_id": "job_19_control_flow_recursive",
+      "item_path": "samples/job_19_control_flow_recursive/job_19_control_flow_recursive.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 5,
+      "errors": []
+    },
+    {
+      "job_id": "job_20_talend_internals_routine_chain",
+      "item_path": "samples/job_20_talend_internals_routine_chain/job_20_talend_internals_routine_chain.item",
+      "xml_well_formed": true,
+      "connections_consistent": true,
+      "components_consistent": true,
+      "node_count": 6,
+      "errors": []
+    }
+  ]
+}

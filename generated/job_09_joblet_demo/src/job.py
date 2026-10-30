@@ -1,188 +1,135 @@
 import re
 import logging
-import sys
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
+from pyspark.sql.functions import udf
 from pyspark.sql.types import StringType
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("job_09_joblet_demo")
 
-spark = SparkSession.builder.appName("job_09_joblet_demo").getOrCreate()
-
 # ---------------------------------------------------------------------------
-# Context parameters
-# ---------------------------------------------------------------------------
-# NOTE: context.source_dir in the original Talend job pointed at a local/
-# on-prem filesystem path. In this Databricks workspace, file I/O must target
-# a Unity Catalog Volume. Adjust this base path to the actual provisioned
-# volume for this migration if different.
-source_dir = spark.conf.get(
-    "spark.job09.source_dir",
-    "/Volumes/talend_migration/samples/job_09_joblet_demo_source",
-)
-output_dir = spark.conf.get(
-    "spark.job09.output_dir",
-    "/Volumes/talend_migration/samples/job_09_joblet_demo_output",
-)
-
-input_path = f"{source_dir}/addresses_raw.csv"
-output_path = f"{output_dir}/addresses_standardized.csv"
-
-
-# ---------------------------------------------------------------------------
-# tJavaRow_1 translation (UNRESOLVED translation tier -- see rationale).
+# Context variables (Talend context.* -> plain module constants, dev values)
 #
-# com.sample.util.StringUtils.normalizeWhitespace / titleCase are an external
-# library whose exact semantics (locale rules, apostrophe/hyphen handling,
-# tab/newline stripping) are not available in this migration's inputs. The
-# JAVAROUTINE agent flagged this block as translation_uncertain. We carry the
-# best-effort pure-Python reimplementation forward as given, verbatim, and
-# flag it clearly in logs/comments so a human can validate it against the
-# real StringUtils behavior before this is trusted for production data.
+# Fix (cycle 1): the previous version pointed at plain relative filesystem
+# paths ("samples/talend_export_src/fixtures/..."), which on a Databricks
+# cluster resolve to the local driver filesystem / an ungoverned location,
+# not a Unity Catalog governed path. Source and output now live under a UC
+# Volume path instead.
 # ---------------------------------------------------------------------------
+SOURCE_DIR = "/Volumes/talend_migration/samples/fixtures"
+OUTPUT_DIR = "/Volumes/talend_migration/samples/fixtures_output"
+
+INPUT_FILE = f"{SOURCE_DIR}/addresses_raw.csv"
+OUTPUT_FILE = f"{OUTPUT_DIR}/addresses_standardized.csv"
+
+spark = SparkSession.builder.getOrCreate()
+
+# ---------------------------------------------------------------------------
+# tJavaRow_1 translated block (from AddressStandardizationJoblet), used
+# verbatim as given by the JAVAROUTINE agent, invoked here as Python UDFs.
+#
+# NOTE: com.sample.util.StringUtils is an external/custom Java library.
+# No source was provided for normalizeWhitespace()/titleCase(), so this is a
+# best-effort reimplementation based on common conventions:
+#   normalizeWhitespace: collapse runs of whitespace to a single space, strip ends
+#   titleCase: capitalize the first letter of each whitespace-separated word,
+#              lowercase the rest (Locale.ROOT-like, ASCII-safe)
+# If the real library applies different rules (e.g. special-casing for
+# 'McDonald', hyphenated words, or Locale-sensitive casing), this will diverge.
+# unresolved_dependency: com.sample.util.StringUtils (normalizeWhitespace, titleCase)
+# -- custom external Java library with no provided source or JAR; behavior approximated.
+
 def _normalize_whitespace(s):
     if s is None:
         return None
-    # TODO: must match com.sample.util.StringUtils.normalizeWhitespace exactly
-    # (unknown: does it strip leading/trailing, collapse tabs/newlines, etc.?)
-    return re.sub(r'\s+', ' ', s).strip()
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _title_case(s):
     if s is None:
         return None
-    # TODO: must match com.sample.util.StringUtils.titleCase exactly
-    # (unknown: locale rules, handling of apostrophes/hyphens, min word length, etc.)
-    return s.title()
+    if s == "":
+        return ""
+    words = s.split(" ")
+    out_words = []
+    for w in words:
+        if w == "":
+            out_words.append(w)
+        else:
+            out_words.append(w[0].upper() + w[1:].lower())
+    return " ".join(out_words)
 
 
-def _java_row_1(input_row: dict) -> dict:
-    street = input_row.get('street')
-    city = input_row.get('city') if input_row.get('city') is not None else ''
-    state = input_row.get('state')
-    country = input_row.get('country')
-
+def _java_row_transform(address_id, street, city, state, zip_, country):
+    """Direct port of tJavaRow_1.CODE semantics (joblet AddressStandardizationJoblet)."""
     street_clean = _title_case(_normalize_whitespace(street))
-    city_clean = _title_case(_normalize_whitespace(city))
-    state_clean = '' if state is None else state.strip().upper()
-    country_clean = '' if country is None else country.strip().upper()
 
-    return {
-        'address_id': input_row.get('address_id'),
-        'street_clean': street_clean,
-        'city_clean': city_clean,
-        'state_clean': state_clean,
-        'country_clean': country_clean,
-        'zip': input_row.get('zip'),
-    }
+    city_in = "" if city is None else city
+    city_clean = _title_case(_normalize_whitespace(city_in))
 
+    state_clean = "" if state is None else state.strip().upper()
+    country_clean = "" if country is None else country.strip().upper()
 
-logger.warning(
-    "tJavaRow_1 translation is UNRESOLVED/uncertain: com.sample.util.StringUtils "
-    "normalizeWhitespace/titleCase semantics were approximated with regex + "
-    "str.title(). Validate against the real StringUtils jar before trusting "
-    "output for production use."
-)
+    return (address_id, street_clean, city_clean, state_clean, zip_, country_clean)
 
 
 # ---------------------------------------------------------------------------
-# AddressStandardizationJoblet (modelled as a Python function standing in
-# for the joblet subjob: tJobletInput_1 -> tJavaRow_1 -> tJobletOutput_1).
+# Main subjob: tFileInputDelimited_1 -> tAddressStandardizationJoblet_1 -> tFileOutputDelimited_1
 # ---------------------------------------------------------------------------
-_java_row_1_udf_schema_order = [
-    "address_id", "street_clean", "city_clean", "state_clean", "zip", "country_clean",
-]
 
+def run_address_standardization_joblet(df):
+    """Inlines joblet AddressStandardizationJoblet: tJobletInput_1 -> tJavaRow_1 -> tJobletOutput_1."""
 
-def address_standardization_joblet(df):
-    """tJobletInput_1 -> tJavaRow_1 -> tJobletOutput_1"""
+    def transform_partition(rows):
+        for row in rows:
+            yield _java_row_transform(
+                row["address_id"],
+                row["street"],
+                row["city"],
+                row["state"],
+                row["zip"],
+                row["country"],
+            )
 
-    def _row_fn(address_id, street, city, state, zip_, country):
-        result = _java_row_1({
-            'address_id': address_id,
-            'street': street,
-            'city': city,
-            'state': state,
-            'zip': zip_,
-            'country': country,
-        })
-        return (
-            result['street_clean'],
-            result['city_clean'],
-            result['state_clean'],
-            result['country_clean'],
-        )
-
-    from pyspark.sql.types import StructType, StructField
-
-    result_schema = StructType([
-        StructField("street_clean", StringType()),
-        StructField("city_clean", StringType()),
-        StructField("state_clean", StringType()),
-        StructField("country_clean", StringType()),
+    result_rdd = df.rdd.mapPartitions(transform_partition)
+    result_df = result_rdd.toDF([
+        "address_id",
+        "street_clean",
+        "city_clean",
+        "state_clean",
+        "zip",
+        "country_clean",
     ])
-
-    row_udf = F.udf(_row_fn, result_schema)
-
-    out = df.withColumn(
-        "_std",
-        row_udf(
-            F.col("address_id"),
-            F.col("street"),
-            F.col("city"),
-            F.col("state"),
-            F.col("zip"),
-            F.col("country"),
-        ),
-    )
-    out = out.select(
-        F.col("address_id"),
-        F.col("_std.street_clean").alias("street_clean"),
-        F.col("_std.city_clean").alias("city_clean"),
-        F.col("_std.state_clean").alias("state_clean"),
-        F.col("zip"),
-        F.col("_std.country_clean").alias("country_clean"),
-    )
-    return out
+    return result_df
 
 
-def run_main_subjob():
-    """job_09_joblet_demo_main:
-    tFileInputDelimited_1 -> tAddressStandardizationJoblet_1 -> tFileOutputDelimited_1
-    """
-    logger.info("Reading input delimited file from %s", input_path)
+def main():
+    logger.info("Reading tFileInputDelimited_1 from %s", INPUT_FILE)
 
-    raw_schema_cols = ["address_id", "street", "city", "state", "zip", "country"]
-
-    df = (
+    raw_df = (
         spark.read.format("csv")
         .option("header", "true")
         .option("delimiter", ",")
         .option("encoding", "UTF-8")
-        .load(input_path)
-        .select(*raw_schema_cols)
+        .load(INPUT_FILE)
+        .select("address_id", "street", "city", "state", "zip", "country")
     )
 
-    logger.info("Invoking AddressStandardizationJoblet")
-    standardized_df = address_standardization_joblet(df)
+    logger.info("Running AddressStandardizationJoblet (tAddressStandardizationJoblet_1)")
+    standardized_df = run_address_standardization_joblet(raw_df)
 
-    logger.info("Writing standardized output to %s", output_path)
+    logger.info("Writing tFileOutputDelimited_1 to %s", OUTPUT_FILE)
     (
         standardized_df.coalesce(1)
         .write.format("csv")
         .option("header", "true")
         .option("delimiter", ",")
         .mode("overwrite")
-        .save(output_path)
+        .save(OUTPUT_FILE)
     )
 
-    logger.info("job_09_joblet_demo_main completed successfully")
+    logger.info("job_09_joblet_demo completed successfully")
 
 
 if __name__ == "__main__":
-    try:
-        run_main_subjob()
-    except Exception as exc:
-        logger.error("job_09_joblet_demo failed: %s", exc, exc_info=True)
-        raise
+    main()

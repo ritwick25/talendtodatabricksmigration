@@ -14,9 +14,21 @@ PySpark DataFrame operations and `spark.sql(...)`, exactly as you would
 in any standalone Spark job.
 
 For Talend `context.*` variables (file paths, DB/table names, flags):
-read them as plain Python module-level constants with the context
-group's `dev` value from the spec as the literal default -- e.g.
-`SOURCE_DIR = "samples/talend_export_src/fixtures"`. Never
+read them as plain Python module-level constants. The spec's own
+context group `dev` value is a value from the *original local*
+synthetic-job generation and is NOT a real path in this workspace --
+never use it literally for a file path. Any sample job's input
+fixtures (CSV/JSON/XML files the original Talend job read) actually
+live, flat, at `/Volumes/talend_migration/samples/talend_export/samples/_fixtures/`
+in this Databricks workspace, with the same filename the component's
+original `FILENAME` parameter used (e.g. `customers.csv`). So for a
+`source_dir`-style context variable, set
+`SOURCE_DIR = "/Volumes/talend_migration/samples/talend_export/samples/_fixtures"`
+-- confirmed from an actual run that failed with
+`UC_VOLUME_NOT_FOUND: Volume talend_migration.samples.fixtures does
+not exist` after guessing a plausible-looking but wrong path. Non-path
+context values (flags, numeric limits, DB/table names) can still use
+the spec's `dev` value literally. Never
 `spark.conf.get(...)` for a custom key: on this serverless (Spark
 Connect) compute it raises `CONFIG_NOT_AVAILABLE.WITHOUT_SUGGESTION`
 even when you pass a default, confirmed by actually running generated
@@ -72,7 +84,13 @@ and will reject an identical resubmission).
   with the exact delimiter/header/encoding from the spec.
 - Already-translated Java blocks: insert them at the point in the
   pipeline the spec says they occur (by `block_id`), using them verbatim
-  as given -- do not re-translate Java yourself.
+  as given -- do not re-translate Java yourself. Wire a per-row/per-
+  partition block in using `mapInPandas`/`mapInArrow`/`applyInPandas`
+  or a plain column UDF -- NEVER `df.rdd.map(...)`, `.rdd.mapPartitions(...)`,
+  `.rdd.foreach(...)`, or any other raw RDD API. Serverless compute
+  rejects these outright (`JVM_ATTRIBUTE_NOT_SUPPORTED: Using custom
+  code using PySpark RDDs is not allowed on serverless compute`,
+  confirmed by actually running generated code that did this).
 - `tRunJob`/joblets -> separate generated job tasks with explicit
   parameter passing (job parameters, or `dbutils.jobs.taskValues` for
   return values), matching `child_jobs`/`joblets` in the spec.

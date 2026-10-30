@@ -1,0 +1,30 @@
+name: protected-paths
+
+# Enforces spec guardrail #4: a PR (including an improvement-cycle PR
+# opened by the agents) may not touch any CODEOWNERS-protected path.
+# A human merging directly to main via CODEOWNERS review is the only
+# sanctioned way to change these paths.
+
+on:
+  pull_request:
+
+jobs:
+  check-protected-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Diff against base and check protected paths
+        run: |
+          set -e
+          PROTECTED='^(src/orchestration/|src/evaluation/|eval/thresholds\.yml|databricks\.yml|resources/|\.github/workflows/|CODEOWNERS)'
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+          VIOLATIONS=$(echo "$CHANGED" | grep -E "$PROTECTED" || true)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "::error::Protected-path violation. These files require a human-authored, CODEOWNERS-reviewed PR:"
+            echo "$VIOLATIONS"
+            exit 1
+          fi

@@ -1,0 +1,10 @@
+# Protected paths per spec guardrail #4: agent-authored PRs touching these
+# paths must fail CI and be logged as a violation. Agents may only write to
+# generated/, knowledge/, prompts/, and migration tables.
+/src/orchestration/      @ritwickpandey
+/src/evaluation/         @ritwickpandey
+/eval/thresholds.yml     @ritwickpandey
+/databricks.yml          @ritwickpandey
+/resources/              @ritwickpandey
+/.github/workflows/      @ritwickpandey
+/CODEOWNERS              @ritwickpandey

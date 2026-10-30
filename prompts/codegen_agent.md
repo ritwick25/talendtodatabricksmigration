@@ -22,8 +22,27 @@ and will reject an identical resubmission).
   changes mid-run, which it normally doesn't in a batch job -- note if
   it would) + `.withColumn()` for expression columns + `.filter()` for
   the main/reject split, matching the spec's `tmaps[]` entry exactly.
-- tDBOutput/tDBInput -> Spark JDBC read/write, with the exact action
-  (`insert`/`truncate`/`UPDATE_OR_INSERT` -> `MERGE INTO`) preserved.
+- tDBOutput/tDBInput -> a Delta table in `talend_migration.samples`
+  (NOT a live JDBC/psycopg2 connection to the external database named
+  in the spec -- this dev workspace has no reachable instance of it,
+  and standing one up is out of scope for this migration). Use the
+  component's `TABLE` parameter, lowercased, as the Delta table name.
+  Preserve the exact `ACTION` semantics using native Spark/Spark SQL,
+  never a second DB-driver connection:
+    - `insert` -> `df.write.format("delta").mode("append").saveAsTable(...)`
+    - `truncate` (+ insert) -> `mode("overwrite")`
+    - `UPDATE_OR_INSERT`/upsert -> register `df` as a temp view, then a
+      parameterized `MERGE INTO <table> USING <temp_view> ON <key columns
+      from the spec's schema, the ones marked key=true> WHEN MATCHED THEN
+      UPDATE SET * WHEN NOT MATCHED THEN INSERT *` via `spark.sql(...)` --
+      table/column identifiers come only from the spec's own schema
+      metadata, never from a context variable or other runtime input, so
+      this is not building SQL from untrusted input.
+  For a `tDBInput` with custom SQL, translate the SQL's intent into a
+  Spark SQL query against the Delta table (e.g. the custom SQL's WHERE/
+  JOIN logic), not a literal JDBC query passthrough. If the referenced
+  table doesn't exist yet, create it (`CREATE TABLE IF NOT EXISTS ...
+  USING DELTA`) using the spec's schema before the first write.
 - File components -> Spark's native readers/writers for that format,
   with the exact delimiter/header/encoding from the spec.
 - Already-translated Java blocks: insert them at the point in the

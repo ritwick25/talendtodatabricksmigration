@@ -1,0 +1,21 @@
+# Protected path (see CODEOWNERS) -- agents can read this to know the
+# bar, but a PR that edits this file fails CI and is logged as a
+# guardrail violation. Only a human changes these numbers.
+#
+# An improvement PR auto-merges only if ALL of these hold when
+# re-evaluated against the affected FAILED-job cluster + 5 random
+# COMPLETED jobs, regenerated from the raw files (not cached):
+
+completed_share_vs_main: ">="        # share reaching COMPLETED >= main
+avg_fix_cycles_vs_main: "<="         # average fix cycles <= main
+verifier_approval_rate_vs_main: ">=" # VERIFIER approval rate >= main
+java_unit_pass_rate_vs_main: ">="    # pass rate on JAVA_EXECUTED cases >= main
+cost_per_job_vs_main: "<= +10%"      # cost per job <= main + 10%
+
+max_improvement_prs_per_cycle: 3
+no_protected_path_changes: true
+no_secrets_detected: true
+
+# A merged PR that later regresses the golden set (eval/golden/) is
+# auto-reverted.
+auto_revert_on_golden_set_regression: true

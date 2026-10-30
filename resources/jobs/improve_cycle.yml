@@ -1,0 +1,21 @@
+# Self-improvement cycle job. NO schedule/trigger (same reasoning as
+# orchestrator.yml) -- run manually or chained after the orchestrator
+# job completes, until scheduling is added later.
+resources:
+  jobs:
+    talend_migration_improve_cycle:
+      name: talend_migration_improve_cycle
+      tasks:
+        - task_key: run_improvement_cycle
+          spark_python_task:
+            python_file: ../../src/orchestration/improvement_cycle.py
+            parameters: ["--profile", "dev"]
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk
+              - mlflow
+              - pyyaml

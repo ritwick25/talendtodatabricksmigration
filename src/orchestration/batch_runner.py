@@ -28,6 +28,8 @@ class JobOutcome:
     status: str  # COMPLETED | FAILED | INFRA_RETRY_EXHAUSTED
     attempts: list[dict] = field(default_factory=list)
     diagnosis: str | None = None
+    spec_uncertain: bool = False
+    java_uncertain: bool = False
 
 
 def _hash_code(code: str) -> str:

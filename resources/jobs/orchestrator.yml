@@ -1,0 +1,24 @@
+# Driver-loop job. Deliberately NO schedule and NO trigger block --
+# scheduling is added later (per spec OUT-of-scope item). Runs batch
+# after batch (src/orchestration/batch_loop.py) until the queue is
+# empty or migration.control.halted/kill_switch stops it. Resumable:
+# a fresh run picks up any IN_PROGRESS rows left by a prior crashed run
+# before selecting new PENDING work.
+resources:
+  jobs:
+    talend_migration_orchestrator:
+      name: talend_migration_orchestrator
+      tasks:
+        - task_key: run_batches
+          spark_python_task:
+            python_file: ../../src/orchestration/batch_loop.py
+            parameters: ["--profile", "dev"]
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk
+              - mlflow
+              - pyyaml

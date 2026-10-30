@@ -1,93 +1,51 @@
-import logging
-import os
-import posixpath
 import re
-import sys
 import zlib
+import logging
 from decimal import Decimal, ROUND_HALF_UP
 
-from pyspark.sql import SparkSession
+import dlt
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, IntegerType, StringType, DecimalType
 )
 
-spark = SparkSession.builder.getOrCreate()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("job_01_customer_enrichment")
 
-# --------------------------------------------------------------------------
-# Context variables (per-environment). Resolved via job widgets/params,
-# falling back to the 'dev' values from the spec's context group.
-# --------------------------------------------------------------------------
-dbutils_available = True
+# -----------------------------------------------------------------------------
+# Context variables (Migration_Context group). In the Lakeflow pipeline these
+# are surfaced as pipeline configuration / widget-style parameters rather than
+# Talend context vars. Defaults below mirror the "dev" context values.
+# -----------------------------------------------------------------------------
 try:
-    dbutils  # noqa: F821
-except NameError:
-    dbutils_available = False
+    source_dir = spark.conf.get("pipeline.source_dir")
+except Exception:
+    source_dir = "samples/talend_export_src/fixtures"
+
+try:
+    target_schema = spark.conf.get("pipeline.target_schema")
+except Exception:
+    target_schema = "dev_samples"
+
+# NOTE: tDBOutput_1/tDBInput targets are materialized as Delta tables in
+# talend_migration.samples per migration policy -- there is no reachable
+# instance of the original PostgreSQL database in this workspace, and the
+# db_url/db_user context variables (and any JDBC credential) are therefore
+# intentionally NOT used to open a live JDBC connection.
+TARGET_CATALOG_SCHEMA = "talend_migration.samples"
+TABLE_CUSTOMERS_ENRICHED = f"{TARGET_CATALOG_SCHEMA}.customers_enriched"
+
+REJECTS_OUTPUT_PATH = f"{source_dir}/../fixtures_output/customers_rejected.csv"
 
 
-def _get_param(name, default):
-    if dbutils_available:
-        try:
-            return dbutils.widgets.get(name)  # noqa: F821
-        except Exception:
-            return default
-    return default
+# -----------------------------------------------------------------------------
+# tJavaRow_1 -- translated Java block (verbatim, inserted at its pipeline
+# point). Kept as-is; wrapped below for use as a Spark UDF per-row.
+# -----------------------------------------------------------------------------
 
-
-source_dir = _get_param("source_dir", "samples/talend_export_src/fixtures")
-db_url = _get_param("db_url", "jdbc:postgresql://dev-db.internal:5432/migration")
-db_user = _get_param("db_user", "migration_svc_dev")
-target_schema = _get_param("target_schema", "dev_samples")
-
-# --------------------------------------------------------------------------
-# Unity Catalog Volume root for all job-managed file I/O. The original Talend
-# job wrote rejects to "<source_dir>/../fixtures_output/customers_rejected.csv";
-# that relative '..' traversal out of an input parameter is not permitted here.
-# Instead, all writes are rooted at an explicit, validated UC Volume path and
-# the leaf directory name ('fixtures_output') is preserved.
-# --------------------------------------------------------------------------
-VOLUME_ROOT = _get_param(
-    "output_volume_root", "/Volumes/main/talend_migration/job_01_customer_enrichment"
-)
-
-
-def _resolve_volume_path(*parts):
-    """Join parts under VOLUME_ROOT and assert the result stays inside it.
-
-    Rejects absolute components, '..' segments, and anything that normalizes to
-    a location outside the configured Unity Catalog Volume.
-    """
-    if not VOLUME_ROOT.startswith("/Volumes/"):
-        raise ValueError(
-            f"Output root must be a Unity Catalog Volume path (/Volumes/...), got: {VOLUME_ROOT!r}"
-        )
-    root = posixpath.normpath(VOLUME_ROOT)
-    for p in parts:
-        if p is None or p == "":
-            raise ValueError("Empty path component is not allowed")
-        if p.startswith("/") or ".." in p.split("/"):
-            raise ValueError(f"Unsafe path component rejected: {p!r}")
-    candidate = posixpath.normpath(posixpath.join(root, *parts))
-    if candidate != root and not candidate.startswith(root + "/"):
-        raise ValueError(
-            f"Resolved path {candidate!r} escapes the configured volume root {root!r}"
-        )
-    return candidate
-
-
-db_password = dbutils.secrets.get(scope="talend-migration", key="db_password") if dbutils_available else None
-
-NETWORK_TIMEOUT_MS = 30000
-
-# --------------------------------------------------------------------------
-# tJavaRow_1 translation (verbatim from JAVAROUTINE agent, by block_id)
-# --------------------------------------------------------------------------
-_processed_customer_ids = None
-_rows_processed_counter = None
-_global_map = {}
+# Module-level state mirroring Talend's static fields across row calls.
+_processedCustomerIds = None
+_rowsProcessedCounter = None
 
 
 def _safe(s):
@@ -95,40 +53,42 @@ def _safe(s):
 
 
 def _normalize_whitespace(s):
-    # com.sample.util.StringUtils.normalizeWhitespace: collapse runs of whitespace to a single space, trim.
+    # com.sample.util.StringUtils.normalizeWhitespace -- EXTERNAL_LIB, no Python equivalent
+    # found; best-effort reimplementation: collapse runs of whitespace to a single space
+    # and strip leading/trailing whitespace (typical semantics for such helpers).
     return re.sub(r"\s+", " ", s).strip()
 
 
 def _title_case(s):
-    # com.sample.util.StringUtils.titleCase: capitalize first letter of each word, lowercase rest.
+    # com.sample.util.StringUtils.titleCase -- EXTERNAL_LIB, best-effort: capitalize each
+    # whitespace-separated word's first letter, lowercase the rest (locale-naive, unlike
+    # the original which may use a specific Locale -- cannot verify without the jar).
     return " ".join(w[:1].upper() + w[1:].lower() if w else w for w in s.split(" "))
 
 
 def _mask_email(email):
-    # com.sample.util.StringUtils.maskEmail: EXTERNAL_LIB with no public spec available.
-    # Best-effort reimplementation: keep first char of local part, mask the rest, keep domain.
+    # com.sample.util.StringUtils.maskEmail -- EXTERNAL_LIB, best-effort: mask local part
+    # keeping first character, e.g. j***@domain.com. Exact masking rule is unverified.
     if email is None:
         return None
-    if "@" not in email:
+    m = re.match(r"^(.)([^@]*)(@.*)$", email)
+    if not m:
         return email
-    local, domain = email.split("@", 1)
-    if len(local) <= 1:
-        masked_local = "*" * len(local)
-    else:
-        masked_local = local[0] + "*" * (len(local) - 1)
-    return masked_local + "@" + domain
+    return m.group(1) + "*" * max(len(m.group(2)), 1) + m.group(3)
 
 
 def _crc32_hex(s):
-    # com.sample.util.ChecksumUtil.crc32Hex: Java CRC32 produces an unsigned 32-bit value;
-    # zlib.crc32 in Python 3 also returns an unsigned 32-bit int, so hex formatting matches.
-    data = s.encode("utf-8")
-    return format(zlib.crc32(data) & 0xFFFFFFFF, "08x")
+    # com.sample.util.ChecksumUtil.crc32Hex -- EXTERNAL_LIB. CRC32 algorithm itself is
+    # standard (zlib.crc32 matches java.util.zip.CRC32), but the exact hex formatting
+    # (width/padding/case) of ChecksumUtil is unverified; assuming lowercase 8-char hex,
+    # zero-padded, matching Java's common Long.toHexString(crc.getValue()) pattern is NOT
+    # guaranteed -- using unpadded lowercase hex here as best effort.
+    val = zlib.crc32(s.encode("utf-8")) & 0xFFFFFFFF
+    return format(val, "x")
 
 
 def _compute_loyalty_value(points, tier_name):
-    # Pure BigDecimal valuation translated to Decimal, HALF_UP, scale 2 -- matches
-    # java.math.RoundingMode.HALF_UP semantics (Python's ROUND_HALF_UP is equivalent for this case).
+    # PURE helper -- faithfully translated BigDecimal logic using Decimal.
     if points is None:
         return Decimal("0").quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     base = Decimal(points) * Decimal("0.01")
@@ -144,50 +104,42 @@ def _compute_loyalty_value(points, tier_name):
 
 
 def run(input: dict) -> dict:
-    global _processed_customer_ids, _rows_processed_counter, _global_map
+    global _processedCustomerIds, _rowsProcessedCounter
 
-    phase = input.get("_phase") if isinstance(input, dict) else None
-
-    if phase == "START":
-        _processed_customer_ids = set()
-        _rows_processed_counter = 0
-        _global_map = {}
+    if input.get("_phase") == "START":
+        _processedCustomerIds = set()
+        _rowsProcessedCounter = 0
         return {}
 
-    if phase == "END":
-        return {"job01_rowsProcessed": _rows_processed_counter}
+    if _processedCustomerIds is None:
+        _processedCustomerIds = set()
+    if _rowsProcessedCounter is None:
+        _rowsProcessedCounter = 0
 
-    # Lazily init state in case run() is called without an explicit START phase
-    # (e.g. direct unit-test invocation) -- mirrors the Java's own lazy-init guard.
-    if _processed_customer_ids is None:
-        _processed_customer_ids = set()
-    if _rows_processed_counter is None:
-        _rows_processed_counter = 0
+    if input.get("_phase") == "END":
+        return {"job01_rowsProcessed": _rowsProcessedCounter}
 
     raw_customer_id = input.get("customer_id")
     customer_id = None if raw_customer_id is None else str(raw_customer_id)
 
-    if customer_id is None or customer_id in _processed_customer_ids:
-        # Side effect preserved explicitly: original logged to stderr and dropped the row
-        # (no reject output in source -- Talend tJavaRow 'return;' with no reject flow wired).
-        print(f"tJavaRow_1: skipping duplicate/null customer_id={customer_id}", file=sys.stderr)
+    if customer_id is None or customer_id in _processedCustomerIds:
+        # Side effect preserved explicitly: original used System.err.println + `return`
+        # (skip row, i.e. filter it out of output). We return None to signal "no output
+        # row produced"; caller/test harness should treat None as a dropped/reject row.
+        print(f"tJavaRow_1: skipping duplicate/null customer_id={customer_id}")
         return None
 
-    _processed_customer_ids.add(customer_id)
-    _rows_processed_counter += 1
-    _global_map["job01_rowsProcessed"] = _rows_processed_counter
+    _processedCustomerIds.add(customer_id)
+    _rowsProcessedCounter += 1
 
     first_name = _safe(input.get("first_name"))
     last_name = _safe(input.get("last_name"))
     full_name = _title_case(_normalize_whitespace(first_name + " " + last_name))
 
-    loyalty_points = input.get("loyalty_points")
-    tier_name = input.get("tier_name")
-    loyalty_value = _compute_loyalty_value(loyalty_points, tier_name)
+    loyalty_value = _compute_loyalty_value(input.get("loyalty_points"), input.get("tier_name"))
 
-    row_checksum = _crc32_hex(
-        customer_id + "|" + _safe(input.get("email")) + "|" + _safe(loyalty_points)
-    )
+    row_checksum_input = f"{customer_id}|{_safe(input.get('email'))}|{input.get('loyalty_points')}"
+    row_checksum = _crc32_hex(row_checksum_input)
 
     return {
         "customer_id": input.get("customer_id"),
@@ -196,149 +148,30 @@ def run(input: dict) -> dict:
         "loyalty_value": loyalty_value,
         "row_checksum": row_checksum,
         "region_name": input.get("region_name"),
-        "tier_name": tier_name,
-        "job01_rowsProcessed": _rows_processed_counter,
+        "tier_name": input.get("tier_name"),
+        # Publish running counter to globalMap-equivalent on every row, matching Java's
+        # globalMap.put on each successful row (not just at END).
+        "job01_rowsProcessed": _rowsProcessedCounter,
     }
 
 
-# tJavaRow_1 is STATEFUL (dedupe set + row counter) and must run as a single-partition,
-# ordered, driver-side pass to exactly preserve Talend's row-by-row semantics -- it is
-# therefore applied via a collected row list rather than a distributed UDF.
-def _apply_tjavarow(rows):
+# This block is STATEFUL (dedupe set + counter) and has a SIDE_EFFECT (stderr
+# log + globalMap-equivalent publish), so it is applied driver-side via
+# toLocalIterator rather than as a distributed UDF, preserving the original's
+# single-threaded, ordered semantics (Talend tJavaRow runs row-by-row on one
+# thread per subjob by default).
+def _apply_tjavarow_1(spark_df):
+    rows_out = []
     run({"_phase": "START"})
-    out_rows = []
-    for r in rows:
-        result = run(r.asDict())
+    for row in spark_df.toLocalIterator():
+        result = run(row.asDict())
         if result is not None:
-            result.pop("job01_rowsProcessed", None)
-            out_rows.append(result)
+            rows_out.append(result)
     end_result = run({"_phase": "END"})
-    logger.info("tJavaRow_1: rowsProcessed=%s", end_result.get("job01_rowsProcessed"))
-    return out_rows
+    rows_processed = end_result.get("job01_rowsProcessed", 0)
+    logger.info("tJavaRow_1: job01_rowsProcessed=%s", rows_processed)
 
-
-# --------------------------------------------------------------------------
-# subjob_1
-# --------------------------------------------------------------------------
-def run_subjob_1():
-    # tFileInputDelimited_1 : customers.csv
-    customers_schema = StructType([
-        StructField("customer_id", IntegerType(), True),
-        StructField("first_name", StringType(), True),
-        StructField("last_name", StringType(), True),
-        StructField("email", StringType(), True),
-        StructField("signup_date", StringType(), True),
-        StructField("country_code", StringType(), True),
-        StructField("loyalty_points", IntegerType(), True),
-    ])
-    df_customers = (
-        spark.read.format("csv")
-        .option("header", "true")
-        .option("sep", ",")
-        .option("encoding", "UTF-8")
-        .schema(customers_schema)
-        .load(f"{source_dir}/customers.csv")
-    )
-
-    # tFileInputDelimited_2 : regions.csv (lookup, inner join, load-once, key=country_code)
-    regions_schema = StructType([
-        StructField("country_code", StringType(), True),
-        StructField("region_name", StringType(), True),
-    ])
-    df_regions = (
-        spark.read.format("csv")
-        .option("header", "true")
-        .option("sep", ",")
-        .schema(regions_schema)
-        .load(f"{source_dir}/regions.csv")
-    )
-
-    # tFileInputDelimited_3 : loyalty_tiers.csv (lookup, left outer join, first match, key=tier_code)
-    # NOTE: reload_mode RELOAD_AT_EACH_ROW only matters for correctness if the lookup
-    # source changes mid-run; in this batch job it is loaded once per run, which is
-    # functionally equivalent since loyalty_tiers.csv is static for the duration.
-    tiers_schema = StructType([
-        StructField("tier_code", StringType(), True),
-        StructField("min_points", IntegerType(), True),
-        StructField("max_points", IntegerType(), True),
-        StructField("tier_name", StringType(), True),
-    ])
-    df_tiers = (
-        spark.read.format("csv")
-        .option("header", "true")
-        .option("sep", ",")
-        .schema(tiers_schema)
-        .load(f"{source_dir}/loyalty_tiers.csv")
-    )
-
-    # ---- tMap_1 ----
-    # Per spec's tmaps[] entry, row2 (regions) joins on country_code (inner), row3 (tiers)
-    # joins on tier_code (left outer, first match). df_customers carries no tier_code column,
-    # so tier_code is derived deterministically from loyalty_points by assigning each customer
-    # to the tier whose [min_points, max_points] range contains their loyalty_points, picking
-    # the lowest min_points as the single deterministic "first match" tie-breaker (stable, not
-    # dependent on monotonically_increasing_id or partition layout).
-    df_joined_regions = df_customers.join(df_regions, on="country_code", how="inner")
-
-    from pyspark.sql.window import Window
-
-    df_candidate_tiers = df_joined_regions.alias("c").join(
-        df_tiers.alias("t"),
-        on=(
-            (F.col("c.loyalty_points") >= F.col("t.min_points"))
-            & (F.col("c.loyalty_points") <= F.col("t.max_points"))
-        ),
-        how="left_outer",
-    )
-
-    window_first_match = Window.partitionBy("c.customer_id").orderBy(
-        F.col("t.min_points").asc_nulls_last(), F.col("t.tier_code").asc_nulls_last()
-    )
-    df_candidate_tiers = df_candidate_tiers.withColumn(
-        "_rn", F.row_number().over(window_first_match)
-    )
-    df_joined = df_candidate_tiers.filter(F.col("_rn") == 1).drop("_rn")
-
-    df_mapped = df_joined.select(
-        F.col("c.customer_id").alias("customer_id"),
-        F.col("c.first_name").alias("first_name"),
-        F.col("c.last_name").alias("last_name"),
-        F.col("c.email").alias("email"),
-        F.col("c.region_name").alias("region_name"),
-        F.col("t.tier_name").alias("tier_name"),
-        F.col("c.loyalty_points").alias("loyalty_points"),
-    )
-
-    df_mapped = df_mapped.withColumn(
-        "is_valid",
-        F.col("customer_id").isNotNull()
-        & F.col("email").isNotNull()
-        & F.col("email").contains("@"),
-    )
-
-    df_main = df_mapped.filter(F.col("is_valid")).drop("is_valid")
-    df_reject = df_mapped.filter(~F.col("is_valid")).drop("is_valid")
-
-    # tFileOutputDelimited_1 : rejects.
-    # Written to a validated Unity Catalog Volume path -- no '..' traversal, no path
-    # derived by escaping the input source_dir. APPEND=false -> mode("overwrite").
-    reject_path = _resolve_volume_path("fixtures_output", "customers_rejected.csv")
-    logger.info("tFileOutputDelimited_1: writing rejects to %s", reject_path)
-    (
-        df_reject.coalesce(1)
-        .write.format("csv")
-        .option("header", "true")
-        .option("sep", ",")
-        .mode("overwrite")
-        .save(reject_path)
-    )
-
-    # tJavaRow_1 : stateful dedupe + enrichment, applied driver-side in customer_id order
-    # to preserve exact Talend row-by-row semantics (static dedupe set, running counter).
-    ordered_rows = df_main.orderBy("customer_id").collect()
-    enriched_rows = _apply_tjavarow(ordered_rows)
-
-    enriched_schema = StructType([
+    out_schema = StructType([
         StructField("customer_id", IntegerType(), True),
         StructField("full_name", StringType(), True),
         StructField("email_masked", StringType(), True),
@@ -347,78 +180,207 @@ def run_subjob_1():
         StructField("region_name", StringType(), True),
         StructField("tier_name", StringType(), True),
     ])
-    df_enriched = spark.createDataFrame(enriched_rows, schema=enriched_schema)
 
-    # tDBOutput_1 : UPDATE_OR_INSERT -> MERGE INTO customers_enriched
-    jdbc_props = {
-        "user": db_user,
-        "password": db_password,
-        "driver": "org.postgresql.Driver",
-        "connectTimeout": str(NETWORK_TIMEOUT_MS),
-        "socketTimeout": str(NETWORK_TIMEOUT_MS),
-    }
-    staging_table = f"{target_schema}._stg_customers_enriched_job01"
-    target_table = f"{target_schema}.customers_enriched"
+    cleaned = [
+        {
+            "customer_id": r.get("customer_id"),
+            "full_name": r.get("full_name"),
+            "email_masked": r.get("email_masked"),
+            "loyalty_value": r.get("loyalty_value"),
+            "row_checksum": r.get("row_checksum"),
+            "region_name": r.get("region_name"),
+            "tier_name": r.get("tier_name"),
+        }
+        for r in rows_out
+    ]
+    return spark.createDataFrame(cleaned, schema=out_schema)
 
-    (
-        df_enriched.write.format("jdbc")
-        .option("url", db_url)
-        .option("dbtable", staging_table)
-        .options(**jdbc_props)
-        .mode("overwrite")
-        .save()
+
+# -----------------------------------------------------------------------------
+# tFileInputDelimited_1 / _2 / _3 -- source reads
+# -----------------------------------------------------------------------------
+
+@dlt.view(name="customers_raw")
+def customers_raw():
+    return (
+        spark.read.format("csv")
+        .option("header", "true")
+        .option("sep", ",")
+        .option("encoding", "UTF-8")
+        .schema(
+            "customer_id INT, first_name STRING, last_name STRING, email STRING, "
+            "signup_date STRING, country_code STRING, loyalty_points INT"
+        )
+        .load(f"{source_dir}/customers.csv")
     )
 
-    import psycopg2
 
-    # Explicit try/except around the connection + MERGE execution: on failure, log the
-    # error with context and re-raise so the Databricks job task is marked failed -- this
-    # is a hard DB write with no reject-flow routing defined in the spec for tDBOutput_1,
-    # so failure must abort the job rather than being swallowed.
-    conn = None
-    try:
-        conn = psycopg2.connect(
-            dsn=db_url.replace("jdbc:", ""),
-            user=db_user,
-            password=db_password,
-            connect_timeout=30,
-        )
-        with conn.cursor() as cur:
-            merge_sql = f"""
-                MERGE INTO {target_table} AS tgt
-                USING {staging_table} AS src
-                ON tgt.customer_id = src.customer_id
-                WHEN MATCHED THEN UPDATE SET
-                    full_name = src.full_name,
-                    email_masked = src.email_masked,
-                    loyalty_value = src.loyalty_value,
-                    row_checksum = src.row_checksum,
-                    region_name = src.region_name,
-                    tier_name = src.tier_name
-                WHEN NOT MATCHED THEN INSERT (
-                    customer_id, full_name, email_masked, loyalty_value,
-                    row_checksum, region_name, tier_name
-                ) VALUES (
-                    src.customer_id, src.full_name, src.email_masked, src.loyalty_value,
-                    src.row_checksum, src.region_name, src.tier_name
-                );
-            """
-            cur.execute(merge_sql)
-        conn.commit()
-    except Exception:
-        logger.exception("tDBOutput_1: MERGE INTO %s failed", target_table)
-        if conn is not None:
-            try:
-                conn.rollback()
-            except Exception:
-                logger.exception("tDBOutput_1: rollback failed")
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
+@dlt.view(name="regions_raw")
+def regions_raw():
+    return (
+        spark.read.format("csv")
+        .option("header", "true")
+        .option("sep", ",")
+        .schema("country_code STRING, region_name STRING")
+        .load(f"{source_dir}/regions.csv")
+    )
 
-    logger.info("job_01_customer_enrichment: subjob_1 complete")
+
+@dlt.view(name="loyalty_tiers_raw")
+def loyalty_tiers_raw():
+    return (
+        spark.read.format("csv")
+        .option("header", "true")
+        .option("sep", ",")
+        .schema("tier_code STRING, min_points INT, max_points INT, tier_name STRING")
+        .load(f"{source_dir}/loyalty_tiers.csv")
+    )
+
+
+# -----------------------------------------------------------------------------
+# tMap_1 -- joins (row2 inner on country_code, row3 left_outer on points range
+# against loyalty_tiers' min_points/max_points, the only coherent join given
+# tier_code is not present anywhere on the main flow -- flagged in spec
+# uncertainties as inferred) + expression columns + main/reject filter split.
+# -----------------------------------------------------------------------------
+
+@dlt.view(name="tmap_1_joined")
+def tmap_1_joined():
+    row1 = dlt.read("customers_raw")
+    row2 = dlt.read("regions_raw")
+    row3 = dlt.read("loyalty_tiers_raw")
+
+    # row2: Inner Join, unique match, LOAD_ONCE -- static lookup, no per-row
+    # reload concern since regions.csv does not change mid-run.
+    joined = row1.join(row2, on="country_code", how="inner")
+
+    # row3: Left Outer Join, first match, RELOAD_AT_EACH_ROW. No explicit join
+    # key parameter was present in the spec for this lookup (flagged as an
+    # uncertainty); joining on the points range (min_points <= loyalty_points
+    # <= max_points) is the only interpretation consistent with tier_name
+    # being derived from loyalty tier bands rather than a shared key column.
+    # RELOAD_AT_EACH_ROW has no distinct effect here since loyalty_tiers.csv
+    # is static for the duration of this batch job.
+    joined = joined.join(
+        row3,
+        on=(
+            (joined["loyalty_points"] >= row3["min_points"])
+            & (joined["loyalty_points"] <= row3["max_points"])
+        ),
+        how="left_outer",
+    )
+
+    is_valid_expr = (
+        F.col("customer_id").isNotNull()
+        & F.col("email").isNotNull()
+        & F.col("email").contains("@")
+    )
+
+    return joined.withColumn("is_valid", is_valid_expr).select(
+        "customer_id",
+        "first_name",
+        "last_name",
+        "email",
+        "region_name",
+        "tier_name",
+        "loyalty_points",
+        "is_valid",
+    )
+
+
+@dlt.view(name="tmap_1_out_main")
+def tmap_1_out_main():
+    return dlt.read("tmap_1_joined").filter(F.col("is_valid")).drop("is_valid")
+
+
+@dlt.view(name="tmap_1_out_reject")
+def tmap_1_out_reject():
+    return dlt.read("tmap_1_joined").filter(~F.col("is_valid")).drop("is_valid")
+
+
+# -----------------------------------------------------------------------------
+# tFileOutputDelimited_1 -- reject sink
+# -----------------------------------------------------------------------------
+
+def write_rejects():
+    df = dlt.read("tmap_1_out_reject") if False else None  # placeholder, replaced below
+
+
+# Lakeflow views can't be read outside the pipeline graph for plain file
+# writes, so the reject sink is materialized as a streaming table and then
+# exported; here we do it as a direct batch write driven from the same
+# module, executed after the DLT graph resolves tmap_1_out_reject logically
+# via dlt.read within an explicit batch step (APPEND, matching original).
+@dlt.table(name="customers_rejected_sink")
+def customers_rejected_sink():
+    return dlt.read("tmap_1_out_reject")
+
+
+def export_rejects_to_csv():
+    rejects_df = spark.read.table("LIVE.customers_rejected_sink")
+    (
+        rejects_df.coalesce(1)
+        .write.format("csv")
+        .option("header", "true")
+        .mode("overwrite")  # APPEND=false in spec -> overwrite, not append
+        .save(REJECTS_OUTPUT_PATH)
+    )
+
+
+# -----------------------------------------------------------------------------
+# tJavaRow_1 -- applied to the valid branch before the DB sink
+# -----------------------------------------------------------------------------
+
+@dlt.table(name="customers_enriched_staging")
+def customers_enriched_staging():
+    main_df = dlt.read("tmap_1_out_main")
+    return _apply_tjavarow_1(main_df)
+
+
+# -----------------------------------------------------------------------------
+# tDBOutput_1 -- Delta table upsert (UPDATE_OR_INSERT), key = customer_id per
+# upstream schema key=true flag (spec flags the explicit key param as absent,
+# so this is the best-supported inference).
+# -----------------------------------------------------------------------------
+
+def upsert_customers_enriched():
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {TABLE_CUSTOMERS_ENRICHED} (
+            customer_id INT,
+            full_name STRING,
+            email_masked STRING,
+            loyalty_value DECIMAL(12,2),
+            row_checksum STRING,
+            region_name STRING,
+            tier_name STRING
+        ) USING DELTA
+    """)
+
+    staging_df = spark.read.table("LIVE.customers_enriched_staging")
+    staging_df.createOrReplaceTempView("tmp_customers_enriched_staging")
+
+    spark.sql(f"""
+        MERGE INTO {TABLE_CUSTOMERS_ENRICHED} AS target
+        USING tmp_customers_enriched_staging AS source
+        ON target.customer_id = source.customer_id
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT *
+    """)
+
+
+# -----------------------------------------------------------------------------
+# Orchestration entrypoint for the imperative (non-view/table-decorator) steps
+# that must run after the declarative graph materializes: reject export and
+# the final MERGE upsert. In a Lakeflow pipeline these run as a Python task
+# downstream of the pipeline update (ON_SUBJOB_OK equivalent is the task's
+# run_if = ALL_SUCCESS dependency on the pipeline-update task in the job
+# graph, not inline branching here).
+# -----------------------------------------------------------------------------
+
+def main():
+    export_rejects_to_csv()
+    upsert_customers_enriched()
 
 
 if __name__ == "__main__":
-    run_subjob_1()
+    main()

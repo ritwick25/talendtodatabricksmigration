@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.config import Config
-from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 
 @dataclass
@@ -38,37 +37,51 @@ def query_model(
     surface directly. No `temperature` param: the Claude models served
     here reject it (BAD_REQUEST), so determinism is left to the prompt.
 
-    Uses generous HTTP/retry timeouts: these are reasoning models given a
-    whole job's raw files, and the SDK's 60s-per-attempt default is too
-    short for that, even though the call does eventually succeed.
+    Uses the SDK's low-level api_client.do() (raw JSON body) rather than
+    the typed serving_endpoints.query(), for two reasons: (1) it needs
+    to send `"thinking": {"type": "disabled"}` -- an Anthropic-specific
+    field the typed method can't express (extra_params is Dict[str, str]
+    only) -- because without it these reasoning models can spend the
+    entire max_tokens budget on invisible reasoning and return an
+    almost-empty answer; (2) it honors Config's http_timeout_seconds,
+    unlike the `databricks` CLI subprocess (tried first), which has its
+    own hardcoded ~60s inactivity timeout that's too short for a full
+    job spec generation.
     """
+    body = {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "max_tokens": max_tokens,
+    }
+    if "claude" in model_endpoint:
+        # "thinking" is an Anthropic-specific field -- other model
+        # families served here (llama, gpt-oss, qwen, ...) reject it
+        # outright with "unknown field", so only send it for Claude.
+        body["thinking"] = {"type": "disabled"}
+
     config = Config(profile=profile, http_timeout_seconds=600, retry_timeout_seconds=900)
     client = WorkspaceClient(config=config)
-    response = client.serving_endpoints.query(
-        name=model_endpoint,
-        messages=[
-            ChatMessage(role=ChatMessageRole.SYSTEM, content=system_prompt),
-            ChatMessage(role=ChatMessageRole.USER, content=user_content),
-        ],
-        max_tokens=max_tokens,
+    response = client.api_client.do(
+        "POST", f"/serving-endpoints/{model_endpoint}/invocations", body=body,
     )
-    choice = response.choices[0]
-    text = _extract_text(choice.message.content)
-    usage = response.usage
+    choice = response["choices"][0]
+    text = _extract_text(choice["message"]["content"])
+    usage = response.get("usage", {})
     return ModelResponse(
         text=text,
-        prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-        completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        prompt_tokens=usage.get("prompt_tokens", 0) or 0,
+        completion_tokens=usage.get("completion_tokens", 0) or 0,
         model_endpoint=model_endpoint,
     )
 
 
 def _extract_text(content) -> str:
-    """Some models return message content as a plain string; reasoning
-    models (as served here) return a list of typed blocks instead (e.g.
-    {"type": "reasoning", ...} + {"type": "text", "text": "..."}). Join
-    just the text blocks -- the reasoning block's content is opaque and
-    not meant to be parsed."""
+    """Normally a plain string with thinking disabled; defensively also
+    handle the typed-block list shape in case a future call re-enables
+    reasoning (join just the "text" blocks -- "reasoning" blocks are
+    opaque and not meant to be parsed)."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -109,33 +122,69 @@ def parse_json_response(text: str) -> dict:
             raise
 
 
+def _looks_truncated(error: json.JSONDecodeError, text_length: int) -> bool:
+    """An unterminated string, or an error position right at the end of
+    the text, means generation ran out of room mid-object -- distinct
+    from a trailing-comma-style slip, which happens well before the end."""
+    return "Unterminated string" in str(error) or error.pos >= text_length - 5
+
+
+MAX_OUTPUT_TOKENS = 8192  # hard server-side cap for the endpoints this system uses
+
+
 def query_model_json(
     system_prompt: str,
     user_content: str,
     model_endpoint: str,
     profile: str = "dev",
-    max_tokens: int = 8000,
+    max_tokens: int = MAX_OUTPUT_TOKENS,
     max_format_retries: int = 2,
 ) -> tuple[dict, ModelResponse]:
-    """query_model + parse_json_response, but re-prompts (feeding the
-    exact parse error back) if the model's output isn't valid JSON --
-    this happens occasionally (trailing comma, stray prose) regardless
-    of how firmly the prompt says "JSON only". This is a format retry,
-    separate from and not counted against any semantic retry budget
-    (spec rounds, fix cycles) the caller enforces elsewhere.
+    """query_model + parse_json_response, but re-prompts if the model's
+    output isn't valid JSON. Two distinct failure modes, handled
+    differently:
+    - Truncation (an unterminated string/object because max_tokens ran
+      out mid-generation, likely for a large job spec): doubles the
+      budget each retry, up to MAX_OUTPUT_TOKENS (the endpoint's hard
+      cap) -- if already at the cap, there's no more room to give, so
+      instead asks the model to be more concise in free-text fields
+      (uncertainties/rationale) rather than hoping for more space.
+    - A genuine formatting slip (trailing comma, stray prose): feed the
+      exact parse error back and ask for a correction at the same
+      max_tokens.
+    Either way this is a format retry, separate from and not counted
+    against any semantic retry budget (spec rounds, fix cycles) the
+    caller enforces elsewhere.
     """
     content = user_content
+    current_max_tokens = min(max_tokens, MAX_OUTPUT_TOKENS)
     last_response = None
     for attempt in range(max_format_retries + 1):
-        last_response = query_model(system_prompt, content, model_endpoint, profile=profile, max_tokens=max_tokens)
+        last_response = query_model(
+            system_prompt, content, model_endpoint, profile=profile, max_tokens=current_max_tokens,
+        )
         try:
             return parse_json_response(last_response.text), last_response
         except json.JSONDecodeError as e:
             if attempt == max_format_retries:
                 raise
-            content = (
-                user_content
-                + f"\n\nYour previous response was not valid JSON: {e}. "
-                "Return ONLY the corrected JSON, nothing else."
-            )
+            if _looks_truncated(e, len(last_response.text)):
+                if current_max_tokens < MAX_OUTPUT_TOKENS:
+                    current_max_tokens = min(current_max_tokens * 2, MAX_OUTPUT_TOKENS)
+                else:
+                    content = (
+                        user_content
+                        + "\n\nYour previous response was truncated (ran out of output "
+                        "space) before the JSON finished. Produce the SAME complete JSON "
+                        "again, but more concisely in free-text fields (uncertainties, "
+                        "rationale, descriptions) so the whole thing fits. Do not drop any "
+                        "components, connections, or java_blocks to save space -- shorten "
+                        "prose, not structure."
+                    )
+            else:
+                content = (
+                    user_content
+                    + f"\n\nYour previous response was not valid JSON: {e}. "
+                    "Return ONLY the corrected JSON, nothing else."
+                )
     raise RuntimeError("unreachable")  # pragma: no cover

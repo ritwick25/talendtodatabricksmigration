@@ -24,10 +24,22 @@ def generate_bundle(pipeline_id: str, code: str, libraries: list[str] | None = N
 
     (bundle_dir / "src" / "job.py").write_text(code)
 
-    libraries = libraries or []
+    # CODEGEN's bundle_resources.libraries is meant to be real jar paths
+    # only, but has been observed putting prose explanations there
+    # instead (e.g. "external library, jar not identified; reimplemented
+    # natively") when it decided no jar was actually needed. Silently
+    # dropping anything that isn't a plausible Volume jar path is safer
+    # than trusting free text as a YAML value -- a real path never has
+    # whitespace and always ends in .jar.
+    libraries = [lib for lib in (libraries or []) if lib.endswith(".jar") and " " not in lib]
     lib_yaml = "\n".join(f"            - jar: {lib}" for lib in libraries)
     libraries_block = f"          libraries:\n{lib_yaml}\n" if libraries else ""
 
+    # Serverless compute per Phase 0's decision: a task needs an explicit
+    # environment_key (jobs don't default to serverless on their own --
+    # confirmed by a real deploy failure: "requires a cluster or an
+    # environment"). client "1" is the current serverless environment spec
+    # version; dependencies stays empty since pyspark is already present.
     job_resource = f"""resources:
   jobs:
     mig_{pipeline_id}:
@@ -36,7 +48,13 @@ def generate_bundle(pipeline_id: str, code: str, libraries: list[str] | None = N
         - task_key: main
           spark_python_task:
             python_file: ../src/job.py
-{libraries_block}"""
+          environment_key: serverless
+{libraries_block}      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies: []
+"""
     (bundle_dir / "resources" / "job.yml").write_text(job_resource)
 
     bundle_yaml = f"""bundle:

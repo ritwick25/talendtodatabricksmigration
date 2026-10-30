@@ -1,0 +1,12 @@
+bundle:
+  name: mig_job_16_date_calendar_processing
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

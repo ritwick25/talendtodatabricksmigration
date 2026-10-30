@@ -1,0 +1,12 @@
+bundle:
+  name: mig_job_18_stateful_batch_counter
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

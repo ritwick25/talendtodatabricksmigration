@@ -11,7 +11,13 @@ and importing it in a plain job task fails immediately
 (`Py4JJavaError: NoSuchElementException: None.get`, confirmed by actually
 running generated code that did this). Read/write data with plain
 PySpark DataFrame operations and `spark.sql(...)`, exactly as you would
-in any standalone Spark job.
+in any standalone Spark job. Never call `df.cache()`, `df.persist()`,
+or `df.unpersist()` -- this serverless compute's current client version
+rejects all three outright
+(`CACHE_REQUIRES_NEWER_CLIENT_ON_SERVERLESS_GC`, confirmed from an
+actual run). If a DataFrame is used more than once, just let Spark
+recompute it, or register it as a temp view with
+`df.createOrReplaceTempView(...)` instead of caching it.
 
 Spark's `regexp_extract`/`regexp_replace`/`rlike` use JAVA regex syntax
 (same engine `java.util.regex.Pattern` uses), not Python's `re` module.

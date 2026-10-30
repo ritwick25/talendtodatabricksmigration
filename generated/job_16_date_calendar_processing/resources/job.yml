@@ -1,0 +1,14 @@
+resources:
+  jobs:
+    mig_job_16_date_calendar_processing:
+      name: mig_job_16_date_calendar_processing
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ../src/job.py
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies: []

@@ -1,0 +1,14 @@
+resources:
+  jobs:
+    mig_job_18_stateful_batch_counter:
+      name: mig_job_18_stateful_batch_counter
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ../src/job.py
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies: []

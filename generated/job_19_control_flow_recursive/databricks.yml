@@ -1,0 +1,12 @@
+bundle:
+  name: mig_job_19_control_flow_recursive
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

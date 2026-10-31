@@ -85,11 +85,18 @@ def deploy_dev(pipeline_id: str, code: str | None = None, libraries: list[str] |
         workspace_dir = f"/Workspace/Users/{user_name}/talend_migration/generated/{pipeline_id}"
         client.api_client.do("POST", "/api/2.0/workspace/mkdirs", body={"path": workspace_dir})
         code_path = f"{workspace_dir}/job.py"
+        # format="AUTO" with no `language` -- format="SOURCE"+language="PYTHON"
+        # (tried first) imports as a NOTEBOOK object, which a
+        # spark_python_task can't read (OSError: Operation not
+        # supported, confirmed from an actual run). AUTO-with-no-language
+        # produces a plain FILE object instead, matching every
+        # bundle-deployed job that's worked all session -- confirmed by
+        # comparing /workspace/get-status object_type on both before
+        # settling on this.
         client.api_client.do("POST", "/api/2.0/workspace/import", body={
             "path": code_path,
             "content": base64.b64encode(code.encode()).decode(),
-            "format": "SOURCE",
-            "language": "PYTHON",
+            "format": "AUTO",
             "overwrite": True,
         })
 

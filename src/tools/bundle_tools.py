@@ -85,6 +85,17 @@ def deploy_dev(pipeline_id: str, code: str | None = None, libraries: list[str] |
         workspace_dir = f"/Workspace/Users/{user_name}/talend_migration/generated/{pipeline_id}"
         client.api_client.do("POST", "/api/2.0/workspace/mkdirs", body={"path": workspace_dir})
         code_path = f"{workspace_dir}/job.py"
+        # Delete first: overwrite=True on /workspace/import refuses to
+        # replace an object across a type change (FILE vs NOTEBOOK) --
+        # confirmed from an actual run ("Cannot overwrite the asset ...
+        # due to type mismatch") against a stale NOTEBOOK left over from
+        # an earlier deploy attempt, before this delete-first step
+        # existed. Deleting first makes every deploy idempotent
+        # regardless of what object type was there before.
+        try:
+            client.api_client.do("POST", "/api/2.0/workspace/delete", body={"path": code_path})
+        except Exception:
+            pass  # didn't exist yet -- fine
         # format="AUTO" with no `language` -- format="SOURCE"+language="PYTHON"
         # (tried first) imports as a NOTEBOOK object, which a
         # spark_python_task can't read (OSError: Operation not

@@ -1,0 +1,14 @@
+resources:
+  jobs:
+    mig_job_05_json_xml_integration:
+      name: mig_job_05_json_xml_integration
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ../src/job.py
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies: []

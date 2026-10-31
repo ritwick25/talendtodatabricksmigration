@@ -72,16 +72,16 @@ def main():
 
     print("\n=== 6. generate_bundle + deploy_dev ===")
     libraries = codegen_result.get("bundle_resources", {}).get("libraries", [])
-    bundle_dir = generate_bundle(pipeline_id, code, libraries=libraries)
-    print(f"bundle written to {bundle_dir}")
-    deploy_result = deploy_dev(pipeline_id, profile=args.profile)
+    bundle_dir = generate_bundle(pipeline_id, code)
+    print(f"local copy written to {bundle_dir}")
+    deploy_result = deploy_dev(pipeline_id, code=code, libraries=libraries, profile=args.profile)
     print(f"deploy success={deploy_result.success}")
     print(deploy_result.output[-3000:])
     if not deploy_result.success:
         return
 
     print("\n=== 7. run_job ===")
-    run_result = run_job(pipeline_id, profile=args.profile, timeout_min=15)
+    run_result = run_job(deploy_result.job_id, profile=args.profile, timeout_min=15)
     print(f"run success={run_result.success} is_infra_error={run_result.is_infra_error}")
     print((run_result.logs or "")[-5000:])
 

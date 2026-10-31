@@ -15,10 +15,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import subprocess
+import sys
 import uuid
 from pathlib import Path
+
+sys.path.insert(0, str(Path(inspect.currentframe().f_code.co_filename).resolve().parents[2]))
 
 from src.agents.improver_agent import propose_improvements
 from src.evaluation.eval_gate import run_eval

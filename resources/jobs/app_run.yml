@@ -1,0 +1,38 @@
+# App-triggered single/bulk run. Distinct from orchestrator.yml's
+# continuous queue-driven loop: this job runs EXACTLY the pipeline_ids
+# named by the caller (the dashboard app, via Jobs run-now with
+# job_parameters) and exits -- it never falls through to queue-driven
+# batches. Still no schedule/trigger (same reasoning as orchestrator.yml).
+resources:
+  jobs:
+    talend_migration_app_run:
+      name: talend_migration_app_run
+      parameters:
+        - name: pipeline_ids
+          default: ""
+        - name: batch_size
+          default: ""
+        - name: max_batches
+          default: ""
+      tasks:
+        - task_key: run
+          spark_python_task:
+            python_file: ../../src/orchestration/batch_loop.py
+            parameters:
+              - "--profile"
+              - "dev"
+              - "--pipeline-ids"
+              - "{{job.parameters.pipeline_ids}}"
+              - "--batch-size"
+              - "{{job.parameters.batch_size}}"
+              - "--max-batches"
+              - "{{job.parameters.max_batches}}"
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk
+              - mlflow
+              - pyyaml

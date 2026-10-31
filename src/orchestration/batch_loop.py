@@ -9,10 +9,24 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from pathlib import Path
+
+# As a Databricks Jobs spark_python_task, this file runs via exec() with
+# only its own directory on sys.path -- the bundle root (where the `src`
+# package lives) isn't added automatically the way `python -m src...`
+# does locally. Confirmed by an actual job run failing with
+# "ModuleNotFoundError: No module named 'src'" before this was added.
+# `__file__` isn't set in this exec() context either (confirmed by a
+# second real failure, NameError on __file__) -- co_filename survives
+# because it's what compile()'s filename argument sets, and is exactly
+# what the traceback itself renders as the file path.
+sys.path.insert(0, str(Path(inspect.currentframe().f_code.co_filename).resolve().parents[2]))
 
 from src.orchestration import control, queue_ops
 from src.orchestration.process_job import process_job
@@ -46,7 +60,10 @@ def _process_one(pipeline_id, profile, warehouse_id, ctl):
         return pipeline_id, "FAILED", None, str(e)[:4000]
 
 
-def run_one_batch(warehouse_id: str, profile: str, ctl: control.ControlState) -> bool:
+def run_one_batch(
+    warehouse_id: str, profile: str, ctl: control.ControlState,
+    explicit_pipeline_ids: list[str] | None = None,
+) -> bool:
     """Returns True if the batch halted the process.
 
     Processes the batch's jobs concurrently (spec rule 1: "concurrency
@@ -61,7 +78,16 @@ def run_one_batch(warehouse_id: str, profile: str, ctl: control.ControlState) ->
     halting; it just can't preempt in-flight work from this batch.
     """
     batch_id = str(uuid.uuid4())
-    pipeline_ids = queue_ops.select_next_batch(batch_id, warehouse_id, profile, batch_size=ctl.batch_size)
+    if explicit_pipeline_ids:
+        # App-triggered single/bulk run: the caller named exactly which
+        # jobs to (re)run, regardless of their current status or the
+        # control table's batch_size. Still mark them IN_PROGRESS first,
+        # same as the queue-driven path, for consistent resumability.
+        pipeline_ids = explicit_pipeline_ids
+        for pid in pipeline_ids:
+            queue_ops.update_job_status(pid, "IN_PROGRESS", warehouse_id, profile, batch_id=batch_id)
+    else:
+        pipeline_ids = queue_ops.select_next_batch(batch_id, warehouse_id, profile, batch_size=ctl.batch_size)
     if not pipeline_ids:
         print("queue is empty")
         return False
@@ -99,6 +125,7 @@ def run_one_batch(warehouse_id: str, profile: str, ctl: control.ControlState) ->
                     fix_attempts=len(outcome.attempts) - 1,
                     java_uncertain=outcome.java_uncertain,
                     spec_uncertain=outcome.spec_uncertain,
+                    **outcome.timing,
                 )
             elif status == "FAILED":
                 failed_count += 1
@@ -107,6 +134,7 @@ def run_one_batch(warehouse_id: str, profile: str, ctl: control.ControlState) ->
                     pipeline_id, "FAILED", warehouse_id, profile,
                     fix_attempts=len(outcome.attempts),
                     last_error=(outcome.diagnosis or "")[:4000],
+                    **outcome.timing,
                 )
                 if failed_count >= ctl.halt_threshold:
                     halted, halt_reason = True, f"{failed_count} jobs FAILED in this batch (threshold {ctl.halt_threshold})"
@@ -129,13 +157,32 @@ def run_one_batch(warehouse_id: str, profile: str, ctl: control.ControlState) ->
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--profile", default="dev")
-    p.add_argument("--max-batches", type=int, default=None, help="stop after this many batches regardless of queue state")
+    p.add_argument(
+        "--max-batches", default=None,
+        help="Stop after this many batches regardless of queue state. "
+             "String type (not int) since Databricks job parameters are always strings -- "
+             "an empty string from an unset job parameter means 'no limit', not an error.",
+    )
+    p.add_argument(
+        "--pipeline-ids", default=None,
+        help="Comma-separated explicit job list (single or bulk, app-triggered). "
+             "Runs exactly these once and exits -- does not fall through to queue-driven batches.",
+    )
+    p.add_argument(
+        "--batch-size", default=None,
+        help="Override control.batch_size for this run only (ignored with --pipeline-ids). String type, same reason as --max-batches.",
+    )
     args = p.parse_args()
+    explicit_pipeline_ids = [p.strip() for p in args.pipeline_ids.split(",") if p.strip()] if args.pipeline_ids else None
+    max_batches = int(args.max_batches) if args.max_batches else None
+    batch_size_override = int(args.batch_size) if args.batch_size else None
 
     warehouse_id = pick_warehouse(args.profile)
     batches_run = 0
     while True:
         ctl = control.read_control(warehouse_id, args.profile)
+        if batch_size_override:
+            ctl.batch_size = batch_size_override
         if ctl.kill_switch:
             print("kill_switch is set -- exiting without starting a new batch")
             queue_ops.requeue_in_progress_to_pending(warehouse_id, args.profile)
@@ -144,12 +191,15 @@ def main():
             print(f"control.halted is set ({ctl.halt_reason}) -- exiting. Reset it manually to resume.")
             break
 
-        halted = run_one_batch(warehouse_id, args.profile, ctl)
+        halted = run_one_batch(warehouse_id, args.profile, ctl, explicit_pipeline_ids=explicit_pipeline_ids)
         batches_run += 1
+        if explicit_pipeline_ids:
+            print("explicit --pipeline-ids run complete, exiting (not falling through to queue-driven batches)")
+            break
         if halted:
             break
-        if args.max_batches and batches_run >= args.max_batches:
-            print(f"reached --max-batches {args.max_batches}, stopping")
+        if max_batches and batches_run >= max_batches:
+            print(f"reached --max-batches {max_batches}, stopping")
             break
 
         # Check if the queue is actually empty (no PENDING/IN_PROGRESS left)

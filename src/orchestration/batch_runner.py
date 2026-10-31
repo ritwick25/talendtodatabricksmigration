@@ -30,6 +30,7 @@ class JobOutcome:
     diagnosis: str | None = None
     spec_uncertain: bool = False
     java_uncertain: bool = False
+    timing: dict = field(default_factory=dict)  # convert/run/total_duration_seconds, if available
 
 
 def _hash_code(code: str) -> str:

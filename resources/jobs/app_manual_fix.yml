@@ -1,0 +1,32 @@
+# App-triggered manual fix: deploys human-edited code (from the
+# dashboard's code editor, written to a Volume by the app) as-is,
+# skipping CODEGEN. No schedule/trigger.
+resources:
+  jobs:
+    talend_migration_app_manual_fix:
+      name: talend_migration_app_manual_fix
+      parameters:
+        - name: pipeline_id
+          default: ""
+        - name: code_volume_path
+          default: ""
+      tasks:
+        - task_key: deploy
+          spark_python_task:
+            python_file: ../../src/orchestration/deploy_manual_code.py
+            parameters:
+              - "--profile"
+              - "dev"
+              - "--pipeline-id"
+              - "{{job.parameters.pipeline_id}}"
+              - "--code-volume-path"
+              - "{{job.parameters.code_volume_path}}"
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk
+              - mlflow
+              - pyyaml

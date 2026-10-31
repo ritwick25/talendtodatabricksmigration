@@ -8,7 +8,9 @@ this and is unit-tested separately with fakes.
 from __future__ import annotations
 
 import json
+import time
 import uuid
+from datetime import datetime, timezone
 
 from src.agents.code_review_agent import MAX_REVIEW_ROUNDS, review_code
 from src.agents.codegen_agent import FALLBACK_MODEL, PRIMARY_MODEL, generate_code
@@ -83,7 +85,7 @@ def translate_all_java_blocks(pipeline_id: str, raw_files: dict, spec: dict, pro
     return translated
 
 
-def make_generate_code_fn(pipeline_id, spec, translated_java_blocks, profile, warehouse_id):
+def make_generate_code_fn(pipeline_id, spec, translated_java_blocks, profile, warehouse_id, timing):
     fix_cycle_counter = {"n": 0}
 
     def generate_code_fn(previous_code, previous_error):
@@ -93,13 +95,14 @@ def make_generate_code_fn(pipeline_id, spec, translated_java_blocks, profile, wa
             spec, translated_java_blocks, fix_cycle=fix_cycle,
             previous_code=previous_code, previous_error=previous_error, profile=profile,
         )
+        timing["codegen_completed_at"] = time.time()
         log_attempt(pipeline_id, "CODEGEN", result["model_endpoint"], {"fix_cycle": fix_cycle}, warehouse_id, profile)
         return json.dumps({"code": result["code"], "libraries": result.get("bundle_resources", {}).get("libraries", [])})
 
     return generate_code_fn
 
 
-def make_deploy_and_run_fn(pipeline_id, translated_java_blocks, profile, warehouse_id, run_timeout_min):
+def make_deploy_and_run_fn(pipeline_id, translated_java_blocks, profile, warehouse_id, run_timeout_min, timing):
     def deploy_and_run_fn(code_payload: str) -> RunResult:
         payload = json.loads(code_payload)
         code, libraries = payload["code"], payload["libraries"]
@@ -127,28 +130,64 @@ def make_deploy_and_run_fn(pipeline_id, translated_java_blocks, profile, warehou
             # cycle. Documented limitation: Phase 7 should close this gap.
             return RunResult(False, False, f"CODE REVIEW blocked (high severity): {json.dumps(high_findings)}", None)
 
-        bundle_dir = generate_bundle(pipeline_id, code, libraries=libraries)
-        deploy_result = deploy_dev(pipeline_id, profile=profile)
+        generate_bundle(pipeline_id, code)  # local copy for git history/debugging
+        deploy_result = deploy_dev(pipeline_id, code=code, libraries=libraries, profile=profile)
         if not deploy_result.success:
             is_infra = _classify_error_text(deploy_result.output)
             return RunResult(False, is_infra, deploy_result.output[-3000:], deploy_result.output)
 
-        run_result = run_job(pipeline_id, profile=profile, timeout_min=run_timeout_min)
+        timing["run_started_at"] = time.time()
+        run_result = run_job(deploy_result.job_id, profile=profile, timeout_min=run_timeout_min)
+        timing["run_completed_at"] = time.time()
         return run_result
 
     return deploy_and_run_fn
 
 
 def process_job(pipeline_id: str, profile: str, warehouse_id: str, max_fix_cycles: int, run_timeout_min: int) -> JobOutcome:
+    timing = {"started_at": time.time()}
+    queue_ops_update_started(pipeline_id, warehouse_id, profile, timing["started_at"])
+
     pipeline_dir = f"{VOLUME_SAMPLES}/{pipeline_id}"
     raw_files = read_raw_files(pipeline_dir, profile=profile)
     spec, spec_uncertain = produce_spec(pipeline_id, raw_files, profile, warehouse_id)
     translated_java_blocks = translate_all_java_blocks(pipeline_id, raw_files, spec, profile, warehouse_id)
 
-    generate_code_fn = make_generate_code_fn(pipeline_id, spec, translated_java_blocks, profile, warehouse_id)
-    deploy_and_run_fn = make_deploy_and_run_fn(pipeline_id, translated_java_blocks, profile, warehouse_id, run_timeout_min)
+    generate_code_fn = make_generate_code_fn(pipeline_id, spec, translated_java_blocks, profile, warehouse_id, timing)
+    deploy_and_run_fn = make_deploy_and_run_fn(pipeline_id, translated_java_blocks, profile, warehouse_id, run_timeout_min, timing)
 
     outcome = run_job_with_fix_cycles(pipeline_id, generate_code_fn, deploy_and_run_fn, max_fix_cycles=max_fix_cycles)
     outcome.spec_uncertain = spec_uncertain
     outcome.java_uncertain = any(b.get("translation_uncertain") for b in translated_java_blocks.values())
+    outcome.timing = compute_timing(timing)
     return outcome
+
+
+def queue_ops_update_started(pipeline_id, warehouse_id, profile, started_at_epoch):
+    ts = datetime.fromtimestamp(started_at_epoch, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+    exec_sql(
+        f"UPDATE {CATALOG}.{SCHEMA}.queue SET started_at = '{ts}' WHERE pipeline_id = '{esc(pipeline_id)}'",
+        warehouse_id, profile,
+    )
+
+
+def compute_timing(timing: dict) -> dict:
+    """Real, measured durations -- never estimated. codegen_completed_at
+    is the last successful codegen call before the deploy that actually
+    ran; run_started_at/run_completed_at bracket the real Databricks job
+    execution. Any key can be missing if the job failed before reaching
+    that phase."""
+    started_at = timing.get("started_at")
+    codegen_completed_at = timing.get("codegen_completed_at")
+    run_started_at = timing.get("run_started_at")
+    run_completed_at = timing.get("run_completed_at")
+
+    result = {}
+    if started_at and codegen_completed_at:
+        result["convert_duration_seconds"] = round(codegen_completed_at - started_at, 1)
+    if run_started_at and run_completed_at:
+        result["run_duration_seconds"] = round(run_completed_at - run_started_at, 1)
+    if started_at:
+        end = run_completed_at or time.time()
+        result["total_duration_seconds"] = round(end - started_at, 1)
+    return result

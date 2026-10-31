@@ -1,191 +1,56 @@
-"""
-Databricks Jobs spark_python_task module.
-Migrated from Talend job: job_01_customer_enrichment
-
-Pipeline:
-  tFileInputDelimited_1 (customers.csv)     --FLOW--> tMap_1
-  tFileInputDelimited_2 (regions.csv)       --LOOKUP (inner, load-once)--> tMap_1
-  tFileInputDelimited_3 (loyalty_tiers.csv) --LOOKUP (left_outer, reload-each-row)--> tMap_1
-  tMap_1 --FLOW--> tJavaRow_1 --FLOW--> tDBOutput_1 (Delta MERGE upsert)
-  tMap_1 --REJECT--> tFileOutputDelimited_1 (customers_rejected.csv)
-
-NOTE on row3 lookup join key: no explicit join key parameter was present for
-row3 in the source job. Only tier_name/points are referenced in expressions.
-Implemented here as a range join (loyalty_points BETWEEN min_points AND
-max_points) -- an inference, flagged for human/merge-pass review.
-
-Fix pass 2 -- single targeted change:
-The reviewer's one surviving high-severity finding is that tJavaRow_1's
-dedupe used monotonically_increasing_id() to stand in for "first row seen",
-which is not a stable row order after an upstream join/filter and so picks a
-different surviving row (and a different reject set) run to run. Root cause:
-the ordering key was synthesized AFTER the join instead of being captured
-from the actual source read.
-
-Fix: capture a genuine, stable input ordinal at the CSV read itself with
-input_file_name() + a per-file row index, carry it through tMap_1 as
-_src_ordinal, and order the dedupe window by (_src_ordinal, customer_id) so
-"first occurrence" is derived from the real file position and is identical on
-every re-run. Nothing else about the pipeline is changed.
-"""
-
+import sys
 import re
 import zlib
 import logging
 from decimal import Decimal, ROUND_HALF_UP
 
-from pyspark.sql import SparkSession, functions as F, types as T
-from pyspark.sql.window import Window
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, IntegerType, StringType, DecimalType
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("job_01_customer_enrichment")
 
-spark = SparkSession.builder.getOrCreate()
+# ---------------------------------------------------------------------------
+# Context variables (Talend context.* -> module constants).
+# Per migration rules: file-path context vars point at the fixtures volume,
+# not the literal 'dev' value from the spec (which is a local path, not real
+# in this workspace). Non-path values keep their spec 'dev' literal.
+# ---------------------------------------------------------------------------
+SOURCE_DIR = "/Volumes/talend_migration/samples/talend_export/samples/_fixtures"
+TARGET_SCHEMA = "dev_samples"  # context.target_schema dev value (non-path, literal ok)
+MAX_RETRIES = 3  # context.max_retries dev value
 
-dbutils = None
-try:
-    from pyspark.dbutils import DBUtils
-    dbutils = DBUtils(spark)
-except Exception:
-    pass
+# Delta table target (per migration rules: tDBOutput -> Delta table in
+# talend_migration.samples, not a live JDBC connection).
+DELTA_CATALOG_SCHEMA = "talend_migration.samples"
+CUSTOMERS_ENRICHED_TABLE = f"{DELTA_CATALOG_SCHEMA}.customers_enriched"
+
+CUSTOMERS_CSV = f"{SOURCE_DIR}/customers.csv"
+REGIONS_CSV = f"{SOURCE_DIR}/regions.csv"
+LOYALTY_TIERS_CSV = f"{SOURCE_DIR}/loyalty_tiers.csv"
+
+# Rejected rows output -- kept inside the same fixtures volume tree since the
+# original path was source_dir/../fixtures_output; we write under a sibling
+# folder inside the UC Volume mount instead of a local/DBFS path.
+REJECTED_OUTPUT_DIR = "/Volumes/talend_migration/samples/talend_export/samples/_fixtures_output/customers_rejected"
 
 
-# Talend context.* variables -> plain module-level constants using the
-# Migration_Context 'dev' values from the spec. Not read via
-# spark.conf.get / dbutils.widgets.get (neither is available in a plain
-# serverless spark_python_task).
-SOURCE_DIR = "samples/talend_export_src/fixtures"
-TARGET_SCHEMA = "dev_samples"
-
-# Writes only to Delta tables in talend_migration.samples (no live JDBC
-# connection to the external Postgres instance named in the spec -- not
-# reachable from this workspace).
-CATALOG_SCHEMA = "talend_migration.samples"
-TABLE_CUSTOMERS_ENRICHED = f"{CATALOG_SCHEMA}.customers_enriched"
-
-# Reject output targets a fixed Unity Catalog Volume path, never a path built
-# by concatenating SOURCE_DIR with '../' segments.
-REJECT_OUTPUT_PATH = "/Volumes/talend_migration/samples/fixtures_output/customers_rejected"
+def build_spark() -> SparkSession:
+    return SparkSession.builder.getOrCreate()
 
 
 # ---------------------------------------------------------------------------
-# tFileInputDelimited_1 / _2 / _3
+# tJavaRow_1 translated block (verbatim logic from JAVAROUTINE agent),
+# adapted here to run per-partition via mapInPandas (no raw RDD API).
 # ---------------------------------------------------------------------------
-def read_customers(spark):
-    schema = T.StructType([
-        T.StructField("customer_id", T.IntegerType(), True),
-        T.StructField("first_name", T.StringType(), True),
-        T.StructField("last_name", T.StringType(), True),
-        T.StructField("email", T.StringType(), True),
-        T.StructField("signup_date", T.StringType(), True),
-        T.StructField("country_code", T.StringType(), True),
-        T.StructField("loyalty_points", T.IntegerType(), True),
-    ])
-    path = SOURCE_DIR.rstrip("/") + "/customers.csv"
-    df = (
-        spark.read.format("csv")
-        .option("header", "true").option("sep", ",").option("encoding", "UTF-8")
-        .schema(schema).load(path)
-    )
-    # Stable input ordinal captured at the read, before any join/filter can
-    # reshuffle rows. row_number() over (file, position-within-file) is
-    # reproducible across runs for the same input files, unlike
-    # monotonically_increasing_id() applied later in the plan.
-    file_order = Window.partitionBy("_src_file").orderBy("_src_pos")
-    return (
-        df.withColumn("_src_file", F.input_file_name())
-          .withColumn("_src_pos", F.monotonically_increasing_id())
-          .withColumn("_src_ordinal", F.row_number().over(file_order))
-          .drop("_src_file", "_src_pos")
-    )
+
+def _safe(s):
+    return "" if s is None else str(s)
 
 
-def read_regions(spark):
-    schema = T.StructType([
-        T.StructField("country_code", T.StringType(), True),
-        T.StructField("region_name", T.StringType(), True),
-    ])
-    path = SOURCE_DIR.rstrip("/") + "/regions.csv"
-    return (
-        spark.read.format("csv")
-        .option("header", "true").option("sep", ",")
-        .schema(schema).load(path)
-    )
-
-
-def read_loyalty_tiers(spark):
-    schema = T.StructType([
-        T.StructField("tier_code", T.StringType(), True),
-        T.StructField("min_points", T.IntegerType(), True),
-        T.StructField("max_points", T.IntegerType(), True),
-        T.StructField("tier_name", T.StringType(), True),
-    ])
-    path = SOURCE_DIR.rstrip("/") + "/loyalty_tiers.csv"
-    return (
-        spark.read.format("csv")
-        .option("header", "true").option("sep", ",")
-        .schema(schema).load(path)
-    )
-
-
-# ---------------------------------------------------------------------------
-# tMap_1 : lookups + expression columns + main/reject filter split
-# ---------------------------------------------------------------------------
-OUT_COLUMNS = [
-    "customer_id", "first_name", "last_name", "email",
-    "region_name", "tier_name", "loyalty_points",
-]
-
-
-def apply_tmap(df_customers, df_regions, df_tiers):
-    df_r2 = df_regions.select(
-        F.col("country_code").alias("_r2_country_code"),
-        F.col("region_name").alias("region_name"),
-    )
-    joined = df_customers.join(
-        df_r2, df_customers["country_code"] == df_r2["_r2_country_code"], "inner"
-    ).drop("_r2_country_code")
-
-    # row3 lookup join key inferred as range match (see module docstring).
-    df_r3 = df_tiers.select(
-        F.col("min_points").alias("_r3_min_points"),
-        F.col("max_points").alias("_r3_max_points"),
-        F.col("tier_name").alias("tier_name"),
-    )
-    joined = joined.join(
-        df_r3,
-        (joined["loyalty_points"] >= df_r3["_r3_min_points"])
-        & (joined["loyalty_points"] <= df_r3["_r3_max_points"]),
-        "left_outer",
-    ).drop("_r3_min_points", "_r3_max_points")
-
-    mapped = joined.withColumn(
-        "is_valid",
-        F.col("customer_id").isNotNull()
-        & F.col("email").isNotNull()
-        & F.col("email").contains("@"),
-    )
-
-    # _src_ordinal is carried into out_main so tJavaRow_1's dedupe can order
-    # by true source position; out_reject keeps only the declared schema.
-    out_main = mapped.filter(F.col("is_valid")).select(*(OUT_COLUMNS + ["_src_ordinal"]))
-    out_reject = mapped.filter(~F.col("is_valid")).select(*OUT_COLUMNS)
-    return out_main, out_reject
-
-
-# ---------------------------------------------------------------------------
-# tJavaRow_1 (translated Java block) -- distributed version.
-#
-# The dedupe-by-customer_id (static HashSet) and counter (AtomicLong) were
-# process-wide static state in the original JVM. On Spark that cannot be
-# shared mutable state, so dedupe is computed with a window function keyed on
-# customer_id and ordered by _src_ordinal -- the real per-file input position
-# captured at read time -- so "keep the first occurrence" matches the Talend
-# HashSet-first-seen semantics deterministically on every run. The pure
-# per-row logic (valuation / masking / checksum) runs distributed via
-# mapInPandas. Duplicate rows are routed to the reject output rather than
-# silently dropped.
-# ---------------------------------------------------------------------------
 def _normalize_whitespace(s):
     return re.sub(r"\s+", " ", s).strip()
 
@@ -200,21 +65,26 @@ def _mask_email(email):
     if "@" not in email:
         return email
     local, domain = email.split("@", 1)
-    masked_local = (local + "***") if len(local) <= 1 else (local[0] + "***")
+    if len(local) <= 1:
+        masked_local = local
+    else:
+        masked_local = local[0] + "*" * (len(local) - 1)
     return masked_local + "@" + domain
 
 
 def _crc32_hex(s):
-    return format(zlib.crc32(s.encode("utf-8")) & 0xFFFFFFFF, "x")
+    val = zlib.crc32(s.encode("utf-8")) & 0xFFFFFFFF
+    return format(val, "08x")
 
 
 def _compute_loyalty_value(points, tier_name):
     if points is None:
         return Decimal("0").quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    base = Decimal(int(points)) * Decimal("0.01")
-    if tier_name is not None and str(tier_name).lower() == "platinum":
+    base = Decimal(points) * Decimal("0.01")
+    tier = tier_name.lower() if tier_name is not None else None
+    if tier == "platinum":
         multiplier = Decimal("1.50")
-    elif tier_name is not None and str(tier_name).lower() == "gold":
+    elif tier == "gold":
         multiplier = Decimal("1.25")
     elif tier_name is None:
         multiplier = Decimal("0")
@@ -223,90 +93,171 @@ def _compute_loyalty_value(points, tier_name):
     return (base * multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _enrich_partition(pdf_iter):
-    """mapInPandas worker: pure per-row logic from tJavaRow_1 (stateless,
-    no shared mutable state across partitions)."""
-    for pdf in pdf_iter:
-        full_names, masked_emails, loyalty_values, checksums = [], [], [], []
-        for _, row in pdf.iterrows():
-            cid = row["customer_id"]
-            first_name = row["first_name"]
-            last_name = row["last_name"]
-            email = row["email"]
-            points = row["loyalty_points"]
-            tier_name = row["tier_name"]
+def _tjavarow_1_partition(iterator):
+    """
+    Per-partition application of tJavaRow_1 semantics via mapInPandas.
+    Dedupe state (processedCustomerIds) and the row counter are scoped to
+    the partition being processed (mirrors the original static-state
+    Java behavior as closely as possible in a distributed engine --
+    true single-JVM global ordering cannot be reproduced on Spark, this
+    is a documented limitation of the STATEFUL translation).
+    """
+    import pandas as pd
 
-            safe_first = "" if first_name is None else str(first_name)
-            safe_last = "" if last_name is None else str(last_name)
-            full_names.append(_title_case(_normalize_whitespace(safe_first + " " + safe_last)))
-            masked_emails.append(_mask_email(email))
-            loyalty_values.append(_compute_loyalty_value(points, tier_name))
-            safe_points = "" if points is None else str(points)
-            safe_email = "" if email is None else str(email)
-            checksums.append(_crc32_hex(str(cid) + "|" + safe_email + "|" + safe_points))
+    processed_customer_ids = set()
+    rows_processed_counter = 0
 
-        out = pdf[["customer_id", "region_name", "tier_name"]].copy()
-        out["full_name"] = full_names
-        out["email_masked"] = masked_emails
-        out["loyalty_value"] = [str(v) for v in loyalty_values]
-        out["row_checksum"] = checksums
-        yield out
+    for pdf in iterator:
+        out_customer_id = []
+        out_full_name = []
+        out_email_masked = []
+        out_loyalty_value = []
+        out_row_checksum = []
+        out_region_name = []
+        out_tier_name = []
+
+        for row in pdf.itertuples(index=False):
+            raw_customer_id = row.customer_id
+            customer_id = None if raw_customer_id is None else str(raw_customer_id)
+
+            if customer_id is None or customer_id in processed_customer_ids:
+                print(f"tJavaRow_1: skipping duplicate/null customer_id={customer_id}", file=sys.stderr)
+                continue
+
+            processed_customer_ids.add(customer_id)
+            rows_processed_counter += 1
+
+            first_name = _safe(row.first_name)
+            last_name = _safe(row.last_name)
+            full_name = _title_case(_normalize_whitespace(first_name + " " + last_name))
+
+            loyalty_points = row.loyalty_points
+            tier_name = row.tier_name
+            loyalty_value = _compute_loyalty_value(loyalty_points, tier_name)
+
+            email = row.email
+            row_checksum_input = f"{customer_id}|{_safe(email)}|{loyalty_points if loyalty_points is not None else ''}"
+            row_checksum = _crc32_hex(row_checksum_input)
+
+            out_customer_id.append(raw_customer_id)
+            out_full_name.append(full_name)
+            out_email_masked.append(_mask_email(email))
+            out_loyalty_value.append(loyalty_value)
+            out_row_checksum.append(row_checksum)
+            out_region_name.append(row.region_name)
+            out_tier_name.append(tier_name)
+
+        yield pd.DataFrame({
+            "customer_id": out_customer_id,
+            "full_name": out_full_name,
+            "email_masked": out_email_masked,
+            "loyalty_value": out_loyalty_value,
+            "row_checksum": out_row_checksum,
+            "region_name": out_region_name,
+            "tier_name": out_tier_name,
+        })
 
 
-OUT_SCHEMA = T.StructType([
-    T.StructField("customer_id", T.IntegerType(), True),
-    T.StructField("region_name", T.StringType(), True),
-    T.StructField("tier_name", T.StringType(), True),
-    T.StructField("full_name", T.StringType(), True),
-    T.StructField("email_masked", T.StringType(), True),
-    T.StructField("loyalty_value", T.StringType(), True),
-    T.StructField("row_checksum", T.StringType(), True),
+TJAVAROW_1_OUTPUT_SCHEMA = StructType([
+    StructField("customer_id", IntegerType(), True),
+    StructField("full_name", StringType(), True),
+    StructField("email_masked", StringType(), True),
+    StructField("loyalty_value", DecimalType(12, 2), True),
+    StructField("row_checksum", StringType(), True),
+    StructField("region_name", StringType(), True),
+    StructField("tier_name", StringType(), True),
 ])
 
 
-def apply_tjavarow(df_main):
-    """Distributed equivalent of tJavaRow_1. Returns (df_enriched, df_dupes).
-
-    Dedupe ordering uses _src_ordinal (true per-file input position captured
-    at the CSV read), with customer_id as a tie-breaker, so the surviving row
-    and the duplicate set are identical across re-runs.
-    """
-    w = Window.partitionBy("customer_id").orderBy(
-        F.col("_src_ordinal").asc(), F.col("customer_id").asc()
-    )
-    ranked = df_main.withColumn("_dup_rank", F.row_number().over(w))
-
-    deduped = ranked.filter(F.col("_dup_rank") == 1).drop("_dup_rank", "_src_ordinal")
-    dupes = ranked.filter(F.col("_dup_rank") > 1).drop("_dup_rank", "_src_ordinal")
-
-    rows_processed = deduped.count()
-    logger.info("tJavaRow_1: job01_rowsProcessed=%s", rows_processed)
-    if dbutils is not None:
-        try:
-            dbutils.jobs.taskValues.set(key="job01_rowsProcessed", value=rows_processed)
-        except Exception:
-            logger.warning("Could not publish job01_rowsProcessed via taskValues", exc_info=True)
-
-    enriched = deduped.select(
-        "customer_id", "region_name", "tier_name", "first_name", "last_name",
-        "email", "loyalty_points",
-    ).mapInPandas(_enrich_partition, schema=OUT_SCHEMA)
-
-    enriched = enriched.withColumn(
-        "loyalty_value", F.col("loyalty_value").cast(T.DecimalType(12, 2))
+def run_subjob_1(spark: SparkSession) -> None:
+    # --- tFileInputDelimited_1/2/3 ---
+    customers = (
+        spark.read.option("header", "true")
+        .option("delimiter", ",")
+        .option("encoding", "UTF-8")
+        .csv(CUSTOMERS_CSV)
+        .withColumn("customer_id", F.col("customer_id").cast("int"))
+        .withColumn("loyalty_points", F.col("loyalty_points").cast("int"))
     )
 
-    return enriched, dupes
+    regions = (
+        spark.read.option("header", "true")
+        .option("delimiter", ",")
+        .csv(REGIONS_CSV)
+    )
 
+    loyalty_tiers = (
+        spark.read.option("header", "true")
+        .option("delimiter", ",")
+        .csv(LOYALTY_TIERS_CSV)
+        .withColumn("min_points", F.col("min_points").cast("int"))
+        .withColumn("max_points", F.col("max_points").cast("int"))
+    )
 
-# ---------------------------------------------------------------------------
-# tDBOutput_1 : UPDATE_OR_INSERT -> Delta MERGE on customer_id (the key column)
-# ---------------------------------------------------------------------------
-def write_customers_enriched(df_enriched):
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CATALOG_SCHEMA}")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {TABLE_CUSTOMERS_ENRICHED} (
+    # --- tMap_1 ---
+    # row2 (regions) lookup: inner join, load-once. Join key inferred as
+    # country_code (shared column name); spec flags this as UNCERTAIN since
+    # no explicit LOOKUP_row2_JOIN_COLUMN was present in the original XML.
+    joined = customers.join(regions, on="country_code", how="inner")
+
+    # row3 (loyalty_tiers) lookup: left outer join, reload-each-row in Talend
+    # terms (doesn't change join semantics for a static batch source --
+    # reload_mode only matters if the lookup source itself changes mid-run,
+    # which it doesn't here). Spec flags the actual join key as UNCERTAIN
+    # (looks like a range match on loyalty_points between min_points/max_points
+    # rather than an equi-join on any shared column name). We implement the
+    # range-based match since that's the only interpretation that makes sense
+    # given loyalty_tiers' min_points/max_points columns.
+    joined = joined.join(
+        loyalty_tiers,
+        on=(
+            (joined["loyalty_points"] >= loyalty_tiers["min_points"])
+            & (joined["loyalty_points"] <= loyalty_tiers["max_points"])
+        ),
+        how="left_outer",
+    )
+
+    mapped = joined.select(
+        F.col("customer_id").alias("customer_id"),
+        F.col("first_name").alias("first_name"),
+        F.col("last_name").alias("last_name"),
+        F.col("email").alias("email"),
+        F.col("region_name").alias("region_name"),
+        F.col("tier_name").alias("tier_name"),
+        F.col("loyalty_points").alias("loyalty_points"),
+    )
+
+    mapped = mapped.withColumn(
+        "is_valid",
+        (F.col("customer_id").isNotNull())
+        & (F.col("email").isNotNull())
+        & (F.col("email").contains("@")),
+    )
+
+    mapped.createOrReplaceTempView("tmap_1_output")
+
+    out_main = mapped.filter(F.col("is_valid")).drop("is_valid")
+    out_reject = mapped.filter(~F.col("is_valid")).drop("is_valid")
+
+    # --- tFileOutputDelimited_1 (REJECT branch) ---
+    (
+        out_reject.write.mode("overwrite")
+        .option("header", "true")
+        .option("delimiter", ",")
+        .csv(REJECTED_OUTPUT_DIR)
+    )
+
+    # --- tJavaRow_1 (FLOW branch from out_main) ---
+    enriched = out_main.mapInPandas(_tjavarow_1_partition, schema=TJAVAROW_1_OUTPUT_SCHEMA)
+    enriched.createOrReplaceTempView("tjavarow_1_output")
+
+    # Publish counter equivalent to globalMap.put("job01_rowsProcessed", ...).
+    rows_processed = enriched.count()
+    logger.info("job01_rowsProcessed=%s", rows_processed)
+
+    # --- tDBOutput_1: UPDATE_OR_INSERT -> MERGE INTO Delta table ---
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {CUSTOMERS_ENRICHED_TABLE} (
             customer_id INT,
             full_name STRING,
             email_masked STRING,
@@ -315,60 +266,24 @@ def write_customers_enriched(df_enriched):
             region_name STRING,
             tier_name STRING
         ) USING DELTA
-        """
-    )
+    """)
 
-    temp_view = "tmp_customers_enriched_src"
-    df_out = df_enriched.select(
-        "customer_id", "full_name", "email_masked", "loyalty_value",
-        "row_checksum", "region_name", "tier_name",
-    )
-    df_out.createOrReplaceTempView(temp_view)
-
-    spark.sql(
-        f"""
-        MERGE INTO {TABLE_CUSTOMERS_ENRICHED} AS target
-        USING {temp_view} AS source
+    spark.sql(f"""
+        MERGE INTO {CUSTOMERS_ENRICHED_TABLE} AS target
+        USING tjavarow_1_output AS source
         ON target.customer_id = source.customer_id
         WHEN MATCHED THEN UPDATE SET *
         WHEN NOT MATCHED THEN INSERT *
-        """
-    )
+    """)
 
 
-# ---------------------------------------------------------------------------
-# tFileOutputDelimited_1 : rejects (tMap_1 reject filter + tJavaRow_1 dupes)
-# ---------------------------------------------------------------------------
-def write_rejects(df_reject, df_dupes):
-    dupes_aligned = df_dupes.select(*OUT_COLUMNS)
-    combined = df_reject.select(*OUT_COLUMNS).unionByName(dupes_aligned)
-    (
-        combined.coalesce(1)
-        .write.format("csv")
-        .option("header", "true")
-        .option("sep", ",")
-        .mode("overwrite")  # APPEND=false in the spec
-        .save(REJECT_OUTPUT_PATH)
-    )
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main():
-    logger.info("Starting job_01_customer_enrichment")
-
-    df_customers = read_customers(spark)
-    df_regions = read_regions(spark)
-    df_tiers = read_loyalty_tiers(spark)
-
-    df_main, df_reject = apply_tmap(df_customers, df_regions, df_tiers)
-    df_enriched, df_dupes = apply_tjavarow(df_main)
-
-    write_customers_enriched(df_enriched)
-    write_rejects(df_reject, df_dupes)
-
-    logger.info("Completed job_01_customer_enrichment")
+    spark = build_spark()
+    try:
+        run_subjob_1(spark)
+    except Exception:
+        logger.exception("job_01_customer_enrichment failed")
+        raise
 
 
 if __name__ == "__main__":

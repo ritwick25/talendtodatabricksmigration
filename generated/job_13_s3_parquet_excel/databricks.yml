@@ -1,0 +1,12 @@
+bundle:
+  name: mig_job_13_s3_parquet_excel
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

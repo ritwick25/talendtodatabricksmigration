@@ -1,0 +1,12 @@
+bundle:
+  name: mig_job_12_db_upsert_truncate
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

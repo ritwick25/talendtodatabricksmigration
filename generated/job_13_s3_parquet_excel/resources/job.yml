@@ -1,0 +1,14 @@
+resources:
+  jobs:
+    mig_job_13_s3_parquet_excel:
+      name: mig_job_13_s3_parquet_excel
+      tasks:
+        - task_key: main
+          spark_python_task:
+            python_file: ../src/job.py
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies: []

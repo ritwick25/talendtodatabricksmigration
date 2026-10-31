@@ -1,0 +1,12 @@
+bundle:
+  name: mig_job_05_json_xml_integration
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405617014325769.9.azuredatabricks.net

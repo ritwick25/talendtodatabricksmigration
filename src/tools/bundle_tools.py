@@ -30,7 +30,6 @@ import base64
 from databricks.sdk import WorkspaceClient
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_GENERATED_ROOT = "/Workspace/Shared/talend_migration/generated"
 
 
 def generate_bundle(pipeline_id: str, code: str, libraries: list[str] | None = None) -> Path:
@@ -75,7 +74,15 @@ def deploy_dev(pipeline_id: str, code: str | None = None, libraries: list[str] |
         if code is None:
             code = (REPO_ROOT / "generated" / pipeline_id / "src" / "job.py").read_text()
 
-        workspace_dir = f"{WORKSPACE_GENERATED_ROOT}/{pipeline_id}"
+        # /Workspace/Shared/... was tried first and failed with
+        # OSError: [Errno 95] Operation not supported when the deployed
+        # job tried to read its own python_file from there (confirmed by
+        # an actual run) -- /Workspace/Users/<user>/... is the pattern
+        # that's worked all session (every bundle-deployed job used it),
+        # so match it instead of guessing a second time.
+        me = client.api_client.do("GET", "/api/2.0/preview/scim/v2/Me")
+        user_name = me["userName"]
+        workspace_dir = f"/Workspace/Users/{user_name}/talend_migration/generated/{pipeline_id}"
         client.api_client.do("POST", "/api/2.0/workspace/mkdirs", body={"path": workspace_dir})
         code_path = f"{workspace_dir}/job.py"
         client.api_client.do("POST", "/api/2.0/workspace/import", body={

@@ -1,0 +1,29 @@
+# App-triggered data validation. Computes real destination-side stats
+# (row count, whole-row checksum) for explicit pipeline_ids, or for every
+# COMPLETED pipeline with no validation_log row yet when pipeline_ids is
+# empty. Never fabricates a Talend-side baseline -- see run_validation.py.
+resources:
+  jobs:
+    talend_migration_app_validate:
+      name: talend_migration_app_validate
+      parameters:
+        - name: pipeline_ids
+          default: ""
+      tasks:
+        - task_key: validate
+          spark_python_task:
+            python_file: ../../src/orchestration/run_validation.py
+            parameters:
+              - "--profile"
+              - "dev"
+              - "--pipeline-ids"
+              - "{{job.parameters.pipeline_ids}}"
+          environment_key: serverless
+      environments:
+        - environment_key: serverless
+          spec:
+            client: "1"
+            dependencies:
+              - databricks-sdk
+              - mlflow
+              - pyyaml

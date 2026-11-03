@@ -110,7 +110,10 @@ def run_one_batch(
             print(f"-- {pipeline_id}: {status} --")
 
             if outcome is None:  # unhandled exception path
-                queue_ops.update_job_status(pipeline_id, "FAILED", warehouse_id, profile, last_error=error, notes="unhandled exception in process_job")
+                queue_ops.update_job_status(
+                    pipeline_id, "FAILED", warehouse_id, profile, last_error=error,
+                    error_signature=(error or "")[:220], notes="unhandled exception in process_job",
+                )
                 failed_count += 1
                 infra_streak = 0
                 if failed_count >= ctl.halt_threshold:
@@ -125,6 +128,7 @@ def run_one_batch(
                     fix_attempts=len(outcome.attempts) - 1,
                     java_uncertain=outcome.java_uncertain,
                     spec_uncertain=outcome.spec_uncertain,
+                    error_signature=None, last_error=None,
                     **outcome.timing,
                 )
             elif status == "FAILED":
@@ -134,13 +138,17 @@ def run_one_batch(
                     pipeline_id, "FAILED", warehouse_id, profile,
                     fix_attempts=len(outcome.attempts),
                     last_error=(outcome.diagnosis or "")[:4000],
+                    error_signature=outcome.error_summary,
                     **outcome.timing,
                 )
                 if failed_count >= ctl.halt_threshold:
                     halted, halt_reason = True, f"{failed_count} jobs FAILED in this batch (threshold {ctl.halt_threshold})"
             elif status == "INFRA_RETRY_EXHAUSTED":
                 infra_streak += 1
-                queue_ops.update_job_status(pipeline_id, "PENDING", warehouse_id, profile, last_error=(outcome.diagnosis or "")[:4000])
+                queue_ops.update_job_status(
+                    pipeline_id, "PENDING", warehouse_id, profile,
+                    last_error=(outcome.diagnosis or "")[:4000], error_signature=outcome.error_summary,
+                )
                 if infra_streak >= 3:
                     halted, halt_reason = True, f"{infra_streak} consecutive infra failures"
 

@@ -21,6 +21,7 @@ call rather than creating a new one each time.
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,7 +63,10 @@ class DeployResult:
     job_id: int | None = None
 
 
-def deploy_dev(pipeline_id: str, code: str | None = None, libraries: list[str] | None = None, profile: str = "dev") -> DeployResult:
+def deploy_dev(
+    pipeline_id: str, code: str | None = None, libraries: list[str] | None = None,
+    pip_dependencies: list[str] | None = None, profile: str = "dev",
+) -> DeployResult:
     """Uploads code to the workspace and creates/updates the Databricks
     Job pointing at it. `code` is optional for backward compatibility
     with callers that already wrote it via generate_bundle() to the
@@ -123,7 +127,10 @@ def deploy_dev(pipeline_id: str, code: str | None = None, libraries: list[str] |
         job_settings = {
             "name": job_name,
             "tasks": [task],
-            "environments": [{"environment_key": "serverless", "spec": {"client": "1", "dependencies": []}}],
+            "environments": [{
+                "environment_key": "serverless",
+                "spec": {"client": "1", "dependencies": list(pip_dependencies or [])},
+            }],
         }
 
         existing = client.api_client.do("GET", "/api/2.1/jobs/list", query={"name": job_name})
@@ -147,6 +154,7 @@ class RunResult:
     error: str | None
     logs: str | None
     run_id: str | None = None
+    error_summary: str | None = None
 
 
 INFRA_ERROR_MARKERS = (
@@ -169,6 +177,27 @@ def _classify_error_text(text: str) -> bool:
     return any(marker.lower() in text.lower() for marker in INFRA_ERROR_MARKERS)
 
 
+_SPARK_ERROR_CODE_RE = re.compile(r"\[([A-Z][A-Z0-9_]{4,})\]\s*([^\n]+)")
+
+
+def _extract_error_summary(text: str, max_len: int = 220) -> str:
+    """Pulls one short, human-readable line out of a full run error dump
+    for the queue table's error_signature column -- distinct from
+    last_error, which keeps the full text for deep debugging. Looks for
+    a Spark/Databricks bracketed error code first (e.g.
+    '[DATA_SOURCE_NOT_FOUND] Failed to find the data source: ...'), since
+    that's the most specific signal; falls back to the first non-blank
+    line (usually the run's own state_message) if no bracketed code is
+    present.
+    """
+    m = _SPARK_ERROR_CODE_RE.search(text)
+    if m:
+        summary = f"[{m.group(1)}] {m.group(2).strip()}"
+    else:
+        summary = next((line.strip() for line in text.splitlines() if line.strip()), text.strip())
+    return summary[:max_len]
+
+
 def run_job(job_id: int, profile: str = "dev", timeout_min: int = 30) -> RunResult:
     """Runs the given job (by numeric job_id, as returned by deploy_dev)
     and polls (raw REST, same reasoning as deploy_dev) until it reaches
@@ -178,7 +207,7 @@ def run_job(job_id: int, profile: str = "dev", timeout_min: int = 30) -> RunResu
         run_now_resp = client.api_client.do("POST", "/api/2.1/jobs/run-now", body={"job_id": job_id})
         run_id = int(run_now_resp["run_id"])
     except Exception as e:
-        return RunResult(False, _classify_error_text(str(e)), str(e), None)
+        return RunResult(False, _classify_error_text(str(e)), str(e), None, error_summary=_extract_error_summary(str(e)))
 
     deadline = time.time() + timeout_min * 60
     run = None
@@ -189,7 +218,8 @@ def run_job(job_id: int, profile: str = "dev", timeout_min: int = 30) -> RunResu
             break
         time.sleep(10)
     else:
-        return RunResult(False, True, f"run exceeded {timeout_min}min timeout", None, str(run_id))
+        timeout_msg = f"run exceeded {timeout_min}min timeout"
+        return RunResult(False, True, timeout_msg, None, str(run_id), error_summary=timeout_msg)
 
     state = run.get("state", {})
     success = state.get("result_state") == "SUCCESS"
@@ -205,4 +235,7 @@ def run_job(job_id: int, profile: str = "dev", timeout_min: int = 30) -> RunResu
         except Exception:
             pass
     error_text = "\n".join(error_parts)
-    return RunResult(False, _classify_error_text(error_text), error_text, error_text, str(run_id))
+    return RunResult(
+        False, _classify_error_text(error_text), error_text, error_text, str(run_id),
+        error_summary=_extract_error_summary(error_text),
+    )

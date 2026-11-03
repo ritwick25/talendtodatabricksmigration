@@ -131,12 +131,13 @@ def _java_row_1_udf(emp_id: pd.Series, dept: pd.Series, salary: pd.Series) -> pd
 
 def run_subjob_1_roster_reconciliation():
     excel_path = f"{SOURCE_DIR}/employee_roster.xlsx"
-    df = (
-        spark.read.format("com.crealytics.spark.excel")
-        .option("header", "true")
-        .option("dataAddress", "'Roster'!A1")
-        .load(excel_path)
-    )
+    # com.crealytics.spark.excel is a Scala/JAR-based Spark data source --
+    # not attachable on serverless compute (confirmed: DATA_SOURCE_NOT_FOUND
+    # on an actual run). Reading via pandas/openpyxl and handing Spark a
+    # DataFrame it already understands avoids needing any JAR at all; the
+    # 'Roster' sheet and header row match the original dataAddress option.
+    pdf = pd.read_excel(excel_path, sheet_name="Roster", header=0, engine="openpyxl")
+    df = spark.createDataFrame(pdf)
 
     # Normalize columns/types to match the spec's tFileInputExcel_1 schema.
     df = df.select(

@@ -14,7 +14,7 @@ from src.tools.read_raw_files import chunk_files
 from src.tools.tracing import trace
 
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "spec_agent.md"
-PROMPT_VERSION = "1"
+PROMPT_VERSION = "2"
 
 
 def _load_prompt() -> str:

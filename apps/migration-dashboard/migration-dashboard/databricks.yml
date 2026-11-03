@@ -6,6 +6,12 @@ variables:
     description: SQL Warehouse ID
   files_path:
     description: Volume path for file storage (e.g. /Volumes/catalog/schema/volume_name)
+  app_run_job_id:
+    description: Job ID of talend_migration_app_run (single/bulk trigger)
+  manual_fix_job_id:
+    description: Job ID of talend_migration_app_manual_fix (deploy edited code)
+  validate_job_id:
+    description: Job ID of talend_migration_app_validate (destination-side data validation)
 
 resources:
   apps:
@@ -31,6 +37,18 @@ resources:
             securable_full_name: ${var.files_path}
             securable_type: VOLUME
             permission: WRITE_VOLUME
+        - name: apprun-job
+          job:
+            id: ${var.app_run_job_id}
+            permission: CAN_MANAGE_RUN
+        - name: manualfix-job
+          job:
+            id: ${var.manual_fix_job_id}
+            permission: CAN_MANAGE_RUN
+        - name: validate-job
+          job:
+            id: ${var.validate_job_id}
+            permission: CAN_MANAGE_RUN
 
 targets:
   default:
@@ -41,3 +59,6 @@ targets:
     variables:
       sql_warehouse_id: b66dc27ad9f891a7
       files_path: talend_migration.samples.talend_export
+      app_run_job_id: 364257707528083
+      manual_fix_job_id: 446834665323198
+      validate_job_id: 391050584537503

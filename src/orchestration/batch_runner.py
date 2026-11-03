@@ -20,6 +20,7 @@ class RunResult:
     is_infra_error: bool = False
     error: str | None = None
     logs: str | None = None
+    error_summary: str | None = None  # short, one-line version of `error` for display
 
 
 @dataclass
@@ -28,6 +29,7 @@ class JobOutcome:
     status: str  # COMPLETED | FAILED | INFRA_RETRY_EXHAUSTED
     attempts: list[dict] = field(default_factory=list)
     diagnosis: str | None = None
+    error_summary: str | None = None  # short, one-line version of `diagnosis` for display
     spec_uncertain: bool = False
     java_uncertain: bool = False
     timing: dict = field(default_factory=dict)  # convert/run/total_duration_seconds, if available
@@ -101,7 +103,7 @@ def run_job_with_fix_cycles(
             if retry_result.is_infra_error:
                 return JobOutcome(
                     pipeline_id, "INFRA_RETRY_EXHAUSTED", attempts,
-                    diagnosis=retry_result.error,
+                    diagnosis=retry_result.error, error_summary=retry_result.error_summary,
                 )
             # Infra retry came back as a code error instead -- fall through
             # and treat it like any other code failure, still on this same
@@ -111,7 +113,10 @@ def run_job_with_fix_cycles(
 
         previous_error = result.error
         if fix_cycle >= max_fix_cycles:
-            return JobOutcome(pipeline_id, "FAILED", attempts, diagnosis=previous_error)
+            return JobOutcome(
+                pipeline_id, "FAILED", attempts,
+                diagnosis=previous_error, error_summary=result.error_summary,
+            )
 
         fix_cycle += 1
         code = generate_code_fn(code, previous_error)

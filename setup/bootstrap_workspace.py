@@ -176,6 +176,30 @@ CREATE TABLE IF NOT EXISTS {catalog}.{schema}.lineage (
   created_at TIMESTAMP
 ) USING DELTA
 """,
+    # Destination-side validation stats, computed by run_validation.py
+    # against the real target table (native Databricks or a Unity Catalog
+    # foreign catalog, e.g. a Redshift connection -- both are queryable the
+    # same way through a SQL warehouse). The talend_* columns stay NULL
+    # until a real Talend-side baseline exists to compare against; this
+    # table exists now so the comparison can be wired in later without a
+    # schema change.
+    "validation_log": """
+CREATE TABLE IF NOT EXISTS {catalog}.{schema}.validation_log (
+  validation_id STRING NOT NULL,
+  pipeline_id STRING NOT NULL,
+  lineage_id STRING,
+  created_at TIMESTAMP,
+  destination_type STRING,
+  destination_system STRING,
+  destination_table STRING,
+  destination_row_count BIGINT,
+  destination_column_checksums STRING,
+  talend_row_count BIGINT,
+  talend_column_checksums STRING,
+  status STRING,
+  notes STRING
+) USING DELTA
+""",
 }
 
 

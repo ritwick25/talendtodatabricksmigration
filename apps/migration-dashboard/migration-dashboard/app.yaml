@@ -4,3 +4,16 @@ env:
     valueFrom: sql-warehouse
   - name: DATABRICKS_VOLUME_FILES
     valueFrom: files
+  - name: DATABRICKS_JOB_APPRUN
+    valueFrom: apprun-job
+  - name: DATABRICKS_JOB_MANUALFIX
+    valueFrom: manualfix-job
+  - name: DATABRICKS_JOB_VALIDATE
+    valueFrom: validate-job
+  # The jobs plugin's static manifest unconditionally requires a generic
+  # "job" resource bound to DATABRICKS_JOB_ID, even when using named
+  # multi-job config (DATABRICKS_JOB_<NAME>) exclusively -- confirmed via
+  # resource-registry.js registering both the static manifest requirement
+  # and the dynamic per-job ones. Satisfy it by reusing apprun-job.
+  - name: DATABRICKS_JOB_ID
+    valueFrom: apprun-job

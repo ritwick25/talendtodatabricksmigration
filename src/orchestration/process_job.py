@@ -18,7 +18,7 @@ from src.agents.javaroutine_agent import translate_java_block
 from src.agents.spec_agent import run_spec_agent
 from src.agents.verifier_agent import MAX_SPEC_ROUNDS, run_verifier_agent
 from src.orchestration.batch_runner import JobOutcome, RunResult, run_job_with_fix_cycles
-from src.tools.bundle_tools import _classify_error_text, deploy_dev, generate_bundle, run_job
+from src.tools.bundle_tools import _classify_error_text, _extract_error_summary, deploy_dev, generate_bundle, run_job
 from src.tools.code_checks import check_syntax, scan_for_secrets
 from src.tools.read_raw_files import extract_java_source, read_raw_files
 from src.tools.sql_exec import esc, exec_sql
@@ -38,6 +38,37 @@ def log_attempt(pipeline_id, agent, model, details, warehouse_id, profile, commi
             '{esc(json.dumps(details)[:8000])}')
     """
     exec_sql(statement.strip(), warehouse_id, profile)
+
+
+def _sql_array(values: list[str]) -> str:
+    if not values:
+        return "array()"
+    return "array(" + ", ".join(f"'{esc(str(v))}'" for v in values) + ")"
+
+
+def write_lineage(pipeline_id: str, spec: dict, warehouse_id: str, profile: str, spec_version: int = 1) -> None:
+    """Writes the SPEC agent's lineage[] entries (source/target table and
+    column info, read straight from the raw Talend XML's elementParameters --
+    e.g. tDBOutput's TABLE/SCHEMA -- never guessed) into the lineage table.
+    Used by the user's own separate data-validation process, not read back
+    by this system."""
+    for entry in spec.get("lineage", []):
+        statement = f"""
+        INSERT INTO {CATALOG}.{SCHEMA}.lineage
+        (pipeline_id, spec_version, lineage_id, subjob_id, component_name, component_type,
+         source_type, source_system, source_table, source_columns,
+         target_type, target_system, target_table, target_columns,
+         column_lineage, transformation_summary, confidence, commit_sha, created_at)
+        VALUES ('{esc(pipeline_id)}', {spec_version}, '{uuid.uuid4()}', '{esc(str(entry.get("subjob_id", "")))}',
+                '{esc(str(entry.get("component_name", "")))}', '{esc(str(entry.get("component_type", "")))}',
+                '{esc(str(entry.get("source_type", "")))}', '{esc(str(entry.get("source_system", "")))}',
+                '{esc(str(entry.get("source_table", "")))}', {_sql_array(entry.get("source_columns") or [])},
+                '{esc(str(entry.get("target_type", "")))}', '{esc(str(entry.get("target_system", "")))}',
+                '{esc(str(entry.get("target_table", "")))}', {_sql_array(entry.get("target_columns") or [])},
+                '{esc(str(entry.get("column_lineage", "")))}', '{esc(str(entry.get("transformation_summary", "")))}',
+                '{esc(str(entry.get("confidence", "")))}', 'unknown', current_timestamp())
+        """
+        exec_sql(statement.strip(), warehouse_id, profile)
 
 
 def produce_spec(pipeline_id: str, raw_files: dict, profile: str, warehouse_id: str) -> tuple[dict, bool]:
@@ -109,11 +140,13 @@ def make_deploy_and_run_fn(pipeline_id, translated_java_blocks, profile, warehou
 
         syntax_ok, syntax_err = check_syntax(code)
         if not syntax_ok:
-            return RunResult(False, False, f"syntax error: {syntax_err}", None)
+            msg = f"syntax error: {syntax_err}"
+            return RunResult(False, False, msg, None, error_summary=msg[:220])
 
         secrets_ok, secret_findings = scan_for_secrets(code)
         if not secrets_ok:
-            return RunResult(False, False, f"secret(s) detected: {secret_findings}", None)
+            msg = f"secret(s) detected: {secret_findings}"
+            return RunResult(False, False, msg, None, error_summary=msg[:220])
 
         for _ in range(MAX_REVIEW_ROUNDS):
             review = review_code(code, list(translated_java_blocks.keys()), profile=profile)
@@ -128,13 +161,19 @@ def make_deploy_and_run_fn(pipeline_id, translated_java_blocks, profile, warehou
             # for review rounds yet, so for now a persistent high finding
             # surfaces as a code-classified failure, consuming a real fix
             # cycle. Documented limitation: Phase 7 should close this gap.
-            return RunResult(False, False, f"CODE REVIEW blocked (high severity): {json.dumps(high_findings)}", None)
+            msg = f"CODE REVIEW blocked (high severity): {json.dumps(high_findings)}"
+            top = high_findings[0]
+            summary = f"CODE_REVIEW blocked: {top.get('category', 'finding')} -- {top.get('description', '')}"
+            return RunResult(False, False, msg, None, error_summary=summary[:220])
 
         generate_bundle(pipeline_id, code)  # local copy for git history/debugging
         deploy_result = deploy_dev(pipeline_id, code=code, libraries=libraries, profile=profile)
         if not deploy_result.success:
             is_infra = _classify_error_text(deploy_result.output)
-            return RunResult(False, is_infra, deploy_result.output[-3000:], deploy_result.output)
+            return RunResult(
+                False, is_infra, deploy_result.output[-3000:], deploy_result.output,
+                error_summary=_extract_error_summary(deploy_result.output),
+            )
 
         timing["run_started_at"] = time.time()
         run_result = run_job(deploy_result.job_id, profile=profile, timeout_min=run_timeout_min)
@@ -151,6 +190,7 @@ def process_job(pipeline_id: str, profile: str, warehouse_id: str, max_fix_cycle
     pipeline_dir = f"{VOLUME_SAMPLES}/{pipeline_id}"
     raw_files = read_raw_files(pipeline_dir, profile=profile)
     spec, spec_uncertain = produce_spec(pipeline_id, raw_files, profile, warehouse_id)
+    write_lineage(pipeline_id, spec, warehouse_id, profile)
     translated_java_blocks = translate_all_java_blocks(pipeline_id, raw_files, spec, profile, warehouse_id)
 
     generate_code_fn = make_generate_code_fn(pipeline_id, spec, translated_java_blocks, profile, warehouse_id, timing)

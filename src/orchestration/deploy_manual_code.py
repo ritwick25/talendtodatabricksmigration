@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(inspect.currentframe().f_code.co_filename).resolve()
 from databricks.sdk import WorkspaceClient
 
 from src.orchestration.process_job import log_attempt
-from src.tools.bundle_tools import _classify_error_text, deploy_dev, generate_bundle, run_job
+from src.tools.bundle_tools import _classify_error_text, _extract_error_summary, deploy_dev, generate_bundle, run_job
 from src.tools.code_checks import check_syntax, scan_for_secrets
 from src.tools.sql_exec import pick_warehouse
 from src.orchestration import queue_ops
@@ -35,7 +35,12 @@ def main():
     p.add_argument("--pipeline-id", required=True)
     p.add_argument("--code-volume-path", required=True, help="Volume path to the edited job.py")
     p.add_argument("--run-timeout-min", default="15")
+    p.add_argument(
+        "--pip-dependencies", default="",
+        help="Comma-separated pip packages the edited code needs on the job's serverless environment (e.g. openpyxl).",
+    )
     args = p.parse_args()
+    pip_dependencies = [d.strip() for d in args.pip_dependencies.split(",") if d.strip()]
 
     warehouse_id = pick_warehouse(args.profile)
     client = WorkspaceClient(profile=args.profile)
@@ -55,18 +60,23 @@ def main():
     secrets_ok, secret_findings = scan_for_secrets(code)
     if not secrets_ok:
         print(f"secret(s) detected: {secret_findings}")
-        queue_ops.update_job_status(args.pipeline_id, "FAILED", warehouse_id, args.profile, last_error=f"manual fix: secret(s) detected: {secret_findings}")
+        queue_ops.update_job_status(
+            args.pipeline_id, "FAILED", warehouse_id, args.profile,
+            last_error=f"manual fix: secret(s) detected: {secret_findings}",
+            error_signature=f"secret(s) detected: {secret_findings}"[:220],
+        )
         log_attempt(args.pipeline_id, "MANUAL_FIX", "human", {"result": "secret_detected", "findings": secret_findings}, warehouse_id, args.profile)
         return
 
     generate_bundle(args.pipeline_id, code)
-    deploy_result = deploy_dev(args.pipeline_id, code=code, profile=args.profile)
+    deploy_result = deploy_dev(args.pipeline_id, code=code, pip_dependencies=pip_dependencies, profile=args.profile)
     if not deploy_result.success:
         is_infra = _classify_error_text(deploy_result.output)
         print(f"deploy failed (infra={is_infra}): {deploy_result.output[-2000:]}")
         queue_ops.update_job_status(
             args.pipeline_id, "FAILED", warehouse_id, args.profile,
             last_error=f"manual fix deploy failed: {deploy_result.output[-4000:]}",
+            error_signature=_extract_error_summary(deploy_result.output),
         )
         log_attempt(args.pipeline_id, "MANUAL_FIX", "human", {"result": "deploy_failed", "is_infra": is_infra}, warehouse_id, args.profile)
         return
@@ -83,13 +93,14 @@ def main():
 
     if run_result.success:
         print("manual fix: run succeeded")
-        queue_ops.update_job_status(args.pipeline_id, "COMPLETED", warehouse_id, args.profile, **timing)
+        queue_ops.update_job_status(args.pipeline_id, "COMPLETED", warehouse_id, args.profile, error_signature=None, last_error=None, **timing)
         log_attempt(args.pipeline_id, "MANUAL_FIX", "human", {"result": "success"}, warehouse_id, args.profile)
     else:
         print(f"manual fix: run failed: {(run_result.error or '')[:2000]}")
         queue_ops.update_job_status(
             args.pipeline_id, "FAILED", warehouse_id, args.profile,
-            last_error=f"manual fix run failed: {(run_result.error or '')[:4000]}", **timing,
+            last_error=f"manual fix run failed: {(run_result.error or '')[:4000]}",
+            error_signature=run_result.error_summary, **timing,
         )
         log_attempt(args.pipeline_id, "MANUAL_FIX", "human", {"result": "run_failed"}, warehouse_id, args.profile)
 
